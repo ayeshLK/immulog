@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/ayeshLK/immulog/api"
+	disruptor "github.com/ayeshLK/lib-disruptor"
 )
 
 func waitForIngressState(t *testing.T, partition *Partition, ready func(admitted, credits, publishers, waiting uint32) bool) {
@@ -40,6 +41,136 @@ func waitForIngressState(t *testing.T, partition *Partition, ready func(admitted
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("timed out waiting for ingress state")
+}
+
+func TestIngressEnqueueCancellationWhileRingIsFull(t *testing.T) {
+	ring, err := disruptor.New(
+		int64(1),
+		disruptor.MultiProducer,
+		func() *ingressEvent { return new(ingressEvent) },
+		disruptor.BlockingWait(),
+		disruptor.WithProducerWait(disruptor.ProducerWaitBlocking),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ring.Close()
+	gate := disruptor.NewSequence(disruptor.InitialSequence)
+	ring.AddGatingSequences(gate)
+	ingress := &partitionIngress{ring: ring, capacity: 1}
+	sequence, err := ring.Next(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ring.Get(sequence).request = &appendRequest{}
+	ring.PublishSequence(sequence)
+	if remaining := ring.RemainingCapacity(); remaining != 0 {
+		t.Fatalf("remaining ring capacity = %d, want 0", remaining)
+	}
+	partition := &Partition{
+		ingress:            ingress,
+		admittedRecords:    1,
+		publicationCredits: 1,
+		publisherWake:      make(chan struct{}),
+		spaceWake:          make(chan struct{}),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- partition.enqueue(ctx, &appendRequest{}) }()
+	waitForIngressState(t, partition, func(_, _, publishers, _ uint32) bool { return publishers == 1 })
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled ingress enqueue = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled ingress enqueue did not return")
+	}
+	partition.queueMu.Lock()
+	defer partition.queueMu.Unlock()
+	if partition.writerUnavailable {
+		t.Fatal("context cancellation fenced the partition")
+	}
+	if partition.admittedRecords != 0 || partition.publicationCredits != 0 || partition.publishing != 0 {
+		t.Fatalf("canceled enqueue retained state: admitted=%d publication=%d publishers=%d", partition.admittedRecords, partition.publicationCredits, partition.publishing)
+	}
+}
+
+func TestIngressHandlerFailureCompletesPendingRequest(t *testing.T) {
+	partition := &Partition{spaceWake: make(chan struct{})}
+	handler := &ingressHandler{partition: partition}
+	request := &appendRequest{result: make(chan appendResult, 1)}
+	if err := handler.Handle(&ingressEvent{request: request}, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	handler.failPending(errors.New("processor stopped"))
+	result := <-request.result
+	if !errors.Is(result.err, api.ErrAppendOutcomeUnknown) {
+		t.Fatalf("failed pending request = %v, want unknown outcome", result.err)
+	}
+	if !errors.Is(result.err, api.ErrPartitionUnavailable) {
+		t.Fatalf("failed pending request = %v, want partition unavailable", result.err)
+	}
+}
+
+func TestIngressDrainsPendingRingRequests(t *testing.T) {
+	ring, err := disruptor.New(
+		int64(4),
+		disruptor.MultiProducer,
+		func() *ingressEvent { return new(ingressEvent) },
+		disruptor.BlockingWait(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ring.Close()
+	processor, err := disruptor.NewBatchProcessor(
+		ring,
+		ring.NewBarrier(),
+		func(*ingressEvent, int64, bool) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingress := &partitionIngress{ring: ring, processor: processor, capacity: 4}
+	partition := &Partition{
+		admittedRecords:    2,
+		publicationCredits: 2,
+		spaceWake:          make(chan struct{}),
+	}
+	requests := []*appendRequest{
+		{result: make(chan appendResult, 1)},
+		{result: make(chan appendResult, 1)},
+	}
+	for index, request := range requests {
+		sequence, err := ring.Next(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ring.Get(sequence).request = request
+		ring.PublishSequence(sequence)
+		if sequence != int64(index) {
+			t.Fatalf("published sequence = %d, want %d", sequence, index)
+		}
+	}
+
+	ingress.drainPending(partition, errors.New("processor stopped"))
+	for index, request := range requests {
+		result := <-request.result
+		if !errors.Is(result.err, api.ErrAppendOutcomeUnknown) || !errors.Is(result.err, api.ErrPartitionUnavailable) {
+			t.Fatalf("drained request %d = %v, want unknown partition-unavailable outcome", index, result.err)
+		}
+		if event := ring.Get(int64(index)); event.request != nil {
+			t.Fatalf("ring slot %d retains request after drain", index)
+		}
+	}
+	partition.queueMu.Lock()
+	defer partition.queueMu.Unlock()
+	if partition.admittedRecords != 0 || partition.publicationCredits != 0 {
+		t.Fatalf("drained state retained: admitted=%d publication=%d", partition.admittedRecords, partition.publicationCredits)
+	}
 }
 
 func TestIngressSaturationBoundsWaiters(t *testing.T) {
@@ -123,8 +254,8 @@ func TestIngressClearsSlotsAndTransfersCredits(t *testing.T) {
 	if admitted != 0 || credits != 0 || publishers != 0 {
 		t.Fatalf("ingress credits after drain = admitted:%d publication:%d publishers:%d", admitted, credits, publishers)
 	}
-	for index, request := range partition.ingress.slots {
-		if request != nil {
+	for index := uint32(0); index < partition.ingress.capacity; index++ {
+		if request := partition.ingress.ring.Get(int64(index)).request; request != nil {
 			t.Fatalf("ingress slot %d retains request after drain", index)
 		}
 	}

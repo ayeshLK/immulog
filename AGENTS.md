@@ -111,10 +111,10 @@ not create, move, reuse, or delete release tags manually.
 ## Release Sequencing
 
 The immediate goal is a pre-v1 release; do not block current hardening on
-freezing the eventual v1 contract. The current ingress dependency remains
-`github.com/smarty/go-disruptor v0.5.0` while upstream
-`ayeshLK/lib-disruptor` improvements are developed. Do not migrate the adapter
-until those changes are ready and the adapter can be requalified.
+freezing the eventual v1 contract. The ingress adapter uses the released
+`github.com/ayeshLK/lib-disruptor v0.4.0`. Future dependency upgrades remain
+subject to the same adapter, durability, cancellation, lifecycle, and
+performance requalification gates.
 
 `PROGRESS.md` and `DEPENDENCY_AUDIT.md` are local working notes and must not be
 staged or committed. Confirm both remain excluded before using broad staging
