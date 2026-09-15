@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Core (Go 1.26.x)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check source headers
+        shell: bash
+        run: |
+          missing=0
+          while IFS= read -r file; do
+            if [[ "$(head -n 1 "$file")" != "// Copyright 2026 Ayesh Almeida" ]]; then
+              echo "Missing copyright header: $file" >&2
+              missing=1
+            fi
+          done < <(git ls-files '*.go')
+          exit "$missing"
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.x
+          check-latest: true
+          cache: false
+      - name: Check formatting
+        run: test -z "$(gofmt -l api storage perf)"
+      - name: Verify local notes are excluded
+        run: test -z "$(git ls-files -- PROGRESS.md DEPENDENCY_AUDIT.md)"
+      - name: Verify module files
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -shuffle=on ./...
+      - name: Race test
+        run: go test -race ./...
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.x
+          check-latest: true
+          cache: false
+      - name: Generate package coverage
+        run: go test -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Report coverage
+        shell: bash
+        run: go tool cover -func=coverage.out | tee coverage.txt
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-${{ github.run_id }}
+          path: |
+            coverage.out
+            coverage.txt
+          if-no-files-found: error
+          retention-days: 30

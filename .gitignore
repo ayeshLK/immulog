@@ -39,6 +39,7 @@ bin/
 dist/
 *.prof
 *.pprof
+/perf-results/
 
 # Local project planning and dependency notes
 /PROGRESS.md

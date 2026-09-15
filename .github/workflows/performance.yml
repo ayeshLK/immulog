@@ -1,0 +1,59 @@
+name: Performance evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      benchtime:
+        description: Go benchmark duration per sample
+        required: true
+        default: 1s
+        type: string
+      benchmark_count:
+        description: Repeated benchmark samples
+        required: true
+        default: "5"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  evidence:
+    name: Informational performance evidence
+    runs-on: ubuntu-latest
+    env:
+      BENCHTIME: ${{ inputs.benchtime }}
+      BENCHMARK_COUNT: ${{ inputs.benchmark_count }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.x
+          check-latest: true
+          cache: false
+      - name: Record environment
+        shell: bash
+        run: |
+          mkdir -p perf-results
+          go version > perf-results/environment.txt
+          go env -json GOOS GOARCH GOAMD64 > perf-results/go-env.json
+          uname -a >> perf-results/environment.txt
+          nproc >> perf-results/environment.txt
+          git rev-parse HEAD >> perf-results/environment.txt
+      - name: Run microbenchmarks
+        shell: bash
+        run: |
+          go test ./perf/benchmarks -run '^$' -bench . -benchmem -benchtime="$BENCHTIME" -count="$BENCHMARK_COUNT" | tee perf-results/benchmarks.txt
+      - name: Upload raw evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: performance-${{ github.run_id }}
+          path: perf-results
+          if-no-files-found: error
+          retention-days: 30
