@@ -1,0 +1,42 @@
+name: Prepare release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-main
+  cancel-in-progress: true
+
+jobs:
+  release-please:
+    name: Update release PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject incomplete release lifecycle
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+        run: |
+          pending="$(
+            gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --state merged \
+              --label "autorelease: pending" \
+              --json number \
+              --jq 'map(.number | tostring) | join(", ")'
+          )"
+          if [[ -n "$pending" ]]; then
+            echo "Merged release PRs still pending publication: $pending" >&2
+            exit 1
+          fi
+      - name: Create or update release PR
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-release: true
+          target-branch: main
