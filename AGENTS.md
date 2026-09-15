@@ -94,6 +94,20 @@ boundary events survive user-stop pressure. Route new append paths through
 Tests exercising pressure can swap `Store.disk.probe` under the ledger lock;
 see `disk_pressure_test.go` for the pattern.
 
+## CI/CD and Repository Automation
+
+Pull requests and pushes to `main` run `.github/workflows/ci.yml` on Linux with
+Go 1.26, formatting, module-tidy, vet, shuffled tests, race tests, and package
+coverage. Fuzzing and performance evidence are manual workflows; use the
+opt-in soak settings documented above rather than running the soak in ordinary
+CI. Linux is the only currently qualified platform, so do not add a
+cross-platform matrix without equivalent lock and disk-pressure implementations.
+
+All third-party GitHub Actions must be pinned to full commit SHAs and workflows
+must retain least-privilege permissions. Release preparation is manual and
+pre-v1; publication automation is not installed yet. Do not create, move,
+reuse, or delete release tags manually.
+
 ## Release Sequencing
 
 The immediate goal is a pre-v1 release; do not block current hardening on
