@@ -53,7 +53,8 @@ jobs:
         run: |
           missing=0
           while IFS= read -r file; do
-            if [[ "$(head -n 1 "$file")" != "// Copyright 2026 Ayesh Almeida" ]]; then
+            header="$(awk '/^\/\/go:build / || /^\/\/ \+build / { next } NF == 0 { next } { print; exit }' "$file")"
+            if [[ "$header" != "// Copyright 2026 Ayesh Almeida" ]]; then
               echo "Missing copyright header: $file" >&2
               missing=1
             fi
