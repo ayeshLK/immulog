@@ -1,0 +1,96 @@
+name: Publish prepared Go module
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish prepared version
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Check out default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: main
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.x
+          check-latest: true
+          cache: false
+      - name: Read and validate prepared version
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(jq -er '.["."] | select(type == "string")' .release-please-manifest.json)"
+          if [[ ! "$VERSION" =~ ^[01]\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "Prepared release must be a valid v0 or v1 semantic version" >&2
+            exit 1
+          fi
+          TAG="v$VERSION"
+          if git rev-parse --verify --quiet "refs/tags/$TAG"; then
+            echo "Tag $TAG already exists; merge the next release PR first" >&2
+            exit 1
+          fi
+          if ! awk -v version="$VERSION" '$1 == "##" && ($2 == version || substr($2, 1, length(version) + 2) == "[" version "]") { found = 1 } END { exit !found }' CHANGELOG.md; then
+            echo "CHANGELOG.md has no release section for $VERSION" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: Verify module
+        shell: bash
+        run: |
+          missing=0
+          while IFS= read -r file; do
+            header="$(awk '/^\/\/go:build / || /^\/\/ \+build / { next } NF == 0 { next } { print; exit }' "$file")"
+            if [[ "$header" != "// Copyright 2026 Ayesh Almeida" ]]; then
+              echo "Missing copyright header: $file" >&2
+              missing=1
+            fi
+          done < <(git ls-files '*.go')
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+          test -z "$(gofmt -l api storage perf)"
+          test -z "$(git ls-files -- PROGRESS.md DEPENDENCY_AUDIT.md)"
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+          go vet ./...
+          go test -shuffle=on ./...
+          go test -race ./...
+          go test -covermode=atomic -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out
+      - name: Create GitHub release
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-pull-request: true
+          target-branch: main
+      - name: Verify GitHub release
+        env:
+          EXPECTED_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_CREATED: ${{ steps.release.outputs.release_created }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          if [[ "$RELEASE_CREATED" != "true" ]]; then
+            echo "Release Please did not create the prepared release" >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_TAG" != "$EXPECTED_TAG" ]]; then
+            echo "Release Please created $RELEASE_TAG, expected $EXPECTED_TAG" >&2
+            exit 1
+          fi

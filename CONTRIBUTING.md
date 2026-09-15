@@ -66,6 +66,6 @@ Actions to full commit SHAs.
 ## Releases
 
 The project uses pre-v1 semantic-version tags such as `v0.1.0`. Release Please
-owns `CHANGELOG.md`; maintainers manually prepare a release PR. Publication
-through a protected `release` environment is planned but not yet automated.
-Do not create, move, reuse, or delete release tags manually.
+owns `CHANGELOG.md`; maintainers manually prepare a release PR and publish it
+through the protected `release` environment after review. Do not create, move,
+reuse, or delete release tags manually.
