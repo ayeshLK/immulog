@@ -7,10 +7,11 @@ Public contracts and stable domain errors are in `api/`; encoding, segment
 management, locking, partitions, and the store live in `storage/`. Core
 correctness tests are co-located with their package (`*_test.go`); benchmark
 and long-running soak harnesses live under `perf/`. `README.md` describes the
-current scope, while `PROGRESS.md` records the implementation checkpoint and
-next steps. Keep future metadata, consumer, retention, and ingress work within the
-planned package boundaries; do not add network or replication code to this
-slice.
+current scope, `BENCHMARKS.md` is the source of truth for performance
+methodology and dated evidence, and `PROGRESS.md` records the implementation
+checkpoint and next steps. Keep future metadata, consumer, retention, and
+ingress work within the planned package boundaries; do not add network or
+replication code to this slice.
 
 ## Build, Test, and Development Commands
 
@@ -98,10 +99,12 @@ see `disk_pressure_test.go` for the pattern.
 
 Pull requests and pushes to `main` run `.github/workflows/ci.yml` on Linux with
 Go 1.26, formatting, module-tidy, vet, shuffled tests, race tests, and package
-coverage. Fuzzing and performance evidence are manual workflows; use the
-opt-in soak settings documented above rather than running the soak in ordinary
-CI. Linux is the only currently qualified platform, so do not add a
-cross-platform matrix without equivalent lock and disk-pressure implementations.
+coverage. Fuzzing and performance evidence are manual workflows; use
+`BENCHMARKS.md` for performance commands, environment capture, and
+interpretation, and use the opt-in soak settings documented above rather than
+running the soak in ordinary CI. Linux is the only currently qualified
+platform, so do not add a cross-platform matrix without equivalent lock and
+disk-pressure implementations.
 
 All third-party GitHub Actions must be pinned to full commit SHAs and workflows
 must retain least-privilege permissions. Release preparation and publication are
