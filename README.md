@@ -1,94 +1,184 @@
 # immulog
 
-`immulog` is a local, durable, append-only, partitioned event-log library for Go.
+<p align="center">
+  <a href="https://pkg.go.dev/github.com/ayeshLK/immulog"><img src="https://pkg.go.dev/badge/github.com/ayeshLK/immulog.svg" alt="Go Reference"></a>
+  <a href="https://github.com/ayeshLK/immulog/actions/workflows/ci.yml"><img src="https://github.com/ayeshLK/immulog/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://img.shields.io/github/license/ayeshLK/immulog"><img src="https://img.shields.io/github/license/ayeshLK/immulog" alt="Apache-2.0 license"></a>
+</p>
 
-This repository follows the companion plan at
-`/home/ayesh/projects/samples/immutable-event-log/IMPLEMENTATION_PLAN.md`.
-Phases 0–6 and the core Phase 7 retention protocol are implemented. Operational capacity hardening, replication, and networking remain later work.
+> A local, durable, append-only, partitioned event log for Go applications.
 
-## Current status
+`immulog` embeds a bounded event stream directly in an application. It stores
+records in a durable filesystem log, assigns monotonic offsets per partition,
+and reopens with conservative recovery after a process restart.
 
-- Public value types and domain errors live in `api/`.
-- Version-1 scalar, record, batch, segment, event, index, and snapshot encoding
-  lives in `storage/` with explicit little-endian fields and CRC32C.
-- `Store.Open` initializes and replays `system/cluster-metadata/0` before
-  `system/consumer-offsets/0`; StoreID and segment anchors are durable facts.
-- Before any recovery mutation, startup read-only preflights both system logs,
-  catalog-owned topic storage, and complete segment/batch identities; only a
-  verified incomplete final tail may be repaired later by partition open.
-- Durable topic-preparation markers preserve recognized unpublished creation
-  artifacts for reconciliation, while ambiguous unreferenced storage fails closed.
-- Catalog mutations use bounded context-aware admission. Cancellation before
-  sequencer ownership is definitive; later cancellation returns an explicit
-  unknown outcome while the owned mutation resolves durably.
-- `CreateTopic`, `DescribeTopic`, `ListTopics`, and `OpenTopic` use the replayed
-  catalog. Topic IDs and creation-time partition configuration are immutable.
-- Projection snapshots are replaceable caches with bounded streaming validation
-  and observable per-log diagnostics; full authoritative replay remains recovery.
-- Each active partition uses a bounded multi-producer ingress ring with one
-  terminal durable writer; appends retain explicit cancellation and failure
-  outcomes while Close seals and drains the ring.
-- Raw readers, single-key consumers, and `OpenConsumerGroup` membership snapshots
-  fetch bounded caller-owned records. Group snapshots persist canonical complete
-  assignments, fresh sessions, fenced next offsets, and durable transition causes.
-  Membership changes are explicit complete snapshots that eagerly fence old handles.
-- An optional durable tail cache uses per-partition `TailSlots`/`TailBytes` and
-  the Store-wide `StoreOptions.TailBytes` cap supplied through `OpenWithOptions`.
-  `StoreOptions` also enforces finite catalog topic, total user-partition,
-  active user-partition writer/ring, consumer-group/progress-key, and
-  per-system-log logical-history limits; none rewrites durable state. Existing
-  system history remains readable after a lower history ceiling is selected,
-  but new catalog or commit growth is refused. Exhausted or contended cache
-  capacity drops an offer; Fetch falls back to segments at the requested cursor,
-  while bounded managed `Poll` waits wake on durable appends, failure, or Close.
-  `Store.Stats` and `Partition.Stats` expose bounded pull-based L/H, logical
-  bytes, system-history headroom, projection counts, admission, tail, and
-  lifecycle snapshots without retaining payloads.
-- The opt-in `TestMixedWorkloadSoak` exercises mixed append/fetch/commit traffic,
-  cancellation and overload, retention/rolling, group churn, tail-cache paths,
-  snapshots, clean reopen cycles, and an independent per-partition oracle. It
-  writes bounded verifier checkpoints when `IMMULOG_SOAK_DIR` is supplied.
-- Catalog topics persist explicit time/size retention policy. A bounded maintenance
-  worker rolls eligible idle active segments, records `PartitionLogStartAdvanced`
-  before publishing L, and removes only its inventoried `.log`, `.index`, and
-  `.timeindex` artifacts. Reopen validates the retained anchor and safely resumes
-  authorized partial cleanup without reviving expired offsets.
-- Replication and networking remain outside the implemented slice.
+> [!WARNING]
+> `immulog` is pre-v1. The public API and on-disk format are still evolving.
+> Linux is the only currently qualified platform. Review the [usage
+> guide](docs/usage.md) and [production guide](docs/production.md) before using
+> it for important data.
 
-See [`PROGRESS.md`](PROGRESS.md) for the implementation checkpoint.
+## Why use immulog?
 
-Run the checks from the repository root:
+- Keep durable event history close to the application without operating a
+  separate broker.
+- Partition records for ordered, independently bounded append and fetch paths.
+- Use caller-owned records, bounded admission, and explicit backpressure rather
+  than unbounded queues.
+- Resume local consumer progress from durable offsets after reopening the store.
+- Apply time- or size-based retention while preserving a durable log-start
+  boundary.
+- Inspect append outcomes, lag, capacity, retention cleanup, and lifecycle state
+  through bounded diagnostics.
+
+## What it is—and is not
+
+`immulog` is a filesystem-backed library for a local, single-process workload.
+It is a good fit for embedded event history, local ingestion pipelines, durable
+work queues within one process, and applications that need replay after restart.
+
+It is not a network service, distributed log, replication system, high
+availability layer, or multi-process coordination protocol. It does not provide
+transport security, authentication, authorization, or encryption of segment
+files. Applications and deployments remain responsible for filesystem
+permissions, at-rest encryption, backups, and storage devices that honor flush
+requests.
+
+## Install
+
+`immulog` requires Go 1.26 or newer. Until the first tagged release, pin a
+reviewed commit or use the current module version during development:
 
 ```sh
-go test ./...      # unit and integration tests
-go test ./storage -run '^$' -fuzz=FuzzDecodeBatch -fuzztime=60m -parallel=1
-go test ./storage -run '^$' -fuzz=FuzzDecodeSegmentHeader -fuzztime=60m -parallel=1
-go test ./storage -run '^$' -fuzz=FuzzPreflightSystemLogSegment -fuzztime=60m -parallel=1
-go test ./perf/benchmarks -run '^$' -bench .
-IMMULOG_SOAK=1 IMMULOG_SOAK_DURATION=20s go test ./perf/soak -run '^TestMixedWorkloadSoak$' -count=1 -timeout=90s
-# For qualification, use a pre-sized dedicated directory and set duration=24h.
-go vet ./...       # static analysis
-go test -race ./... # race detector
+go get github.com/ayeshLK/immulog
 ```
 
-### Mixed-workload soak
+Import the public contracts and storage engine as separate packages:
 
-The release soak is opt-in and writes only to its supplied data directory. A
-short smoke is:
+```go
+import (
+	"github.com/ayeshLK/immulog/api"
+	"github.com/ayeshLK/immulog/storage"
+)
+```
+
+## Quick start
+
+The basic lifecycle is: open a directory, create a topic, append a record,
+fetch it by offset, and close the store.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	"github.com/ayeshLK/immulog/api"
+	"github.com/ayeshLK/immulog/storage"
+)
+
+func main() {
+	ctx := context.Background()
+	dir, err := os.MkdirTemp("", "immulog-")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	store, err := storage.Open(dir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			log.Print(err)
+		}
+	}()
+
+	topic, err := store.CreateTopic("orders", 1, storage.PartitionOptions{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	partitions, err := store.OpenTopic(topic.Name)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	record, err := partitions[0].Append(ctx, api.AppendRequest{
+		Topic:     topic.ID,
+		Partition: 0,
+		Key:       []byte("order-1"),
+		Value:     []byte(`{"status":"new"}`),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	result, err := partitions[0].Fetch(ctx, record.Offset, api.FetchOptions{
+		MaxRecords: 10,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("fetched %d record(s), next offset is %d", len(result.Records), result.NextOffset)
+}
+```
+
+`Append` copies the request, assigns the partition offset, and returns after
+the durable append path completes. A context cancellation after the request
+has entered the writer can return `api.ErrAppendOutcomeUnknown`; callers must
+not assume that the record was rolled back or that its offset can be reused.
+
+## Core concepts
+
+- **Store:** owns one data directory and its stable `LOCK` file. Only one open
+  store may own a directory at a time.
+- **Topic:** a durable catalog entry with an immutable name, ID, and partition
+  configuration.
+- **Partition:** an ordered append-only stream. Offsets are assigned per
+  partition and are never reused.
+- **Durable end (`H`):** the next offset after the records known to be durable.
+- **Log start (`L`):** the first retained offset after retention advances the
+  boundary.
+- **Consumer:** a same-process assignment that polls records and explicitly
+  commits a next offset. Delivery is at-least-once.
+
+Records and fetch results are caller-owned. Copy data that must outlive the
+operation or consumer handler; do not retain internal references.
+
+## Choose a guide
+
+- [Usage guide](docs/usage.md): open stores, create topics, append and fetch
+  records, read with cursors, consume with commits, handle errors, and reopen.
+- [Production guide](docs/production.md): choose limits, plan disk capacity,
+  understand durability and recovery, operate retention, monitor diagnostics,
+  and shut down safely.
+- [Contributing](CONTRIBUTING.md): development setup, validation commands,
+  pull-request expectations, and release hygiene.
+- [Security policy](SECURITY.md): private vulnerability reporting and the
+  library's security boundary.
+- [Code of Conduct](CODE_OF_CONDUCT.md): expectations for respectful project
+  participation and private conduct reporting.
+- [Go package reference](https://pkg.go.dev/github.com/ayeshLK/immulog): the
+  complete exported API.
+
+## Development checks
+
+Run the standard checks from the repository root:
 
 ```sh
-IMMULOG_SOAK=1 IMMULOG_SOAK_DURATION=20s \
-  go test ./perf/soak -run '^TestMixedWorkloadSoak$' -count=1 -timeout=90s -v
+go test ./...
+go vet ./...
+go test -race ./...
 ```
 
-For qualification, set `IMMULOG_SOAK_DIR` to a pre-sized dedicated volume and
-run with `IMMULOG_SOAK_DURATION=24h` and a test timeout longer than 24 hours.
-The harness performs clean reopen cycles and persists bounded verifier offsets;
-separate invocations can resume clean chunks against the same directory. It
-does
-not model process crashes, torn writes, or power-loss storage behavior; focused
-storage tests cover process termination and injected filesystem failures.
+Fuzzing, benchmark, and the mixed-workload soak are intentionally separate
+from ordinary CI. Their commands and qualification notes are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-This project is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+Copyright 2026 Ayesh Almeida. Licensed under the Apache License, Version 2.0.
+See [LICENSE](LICENSE).
