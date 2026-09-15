@@ -104,9 +104,9 @@ CI. Linux is the only currently qualified platform, so do not add a
 cross-platform matrix without equivalent lock and disk-pressure implementations.
 
 All third-party GitHub Actions must be pinned to full commit SHAs and workflows
-must retain least-privilege permissions. Release preparation is manual and
-pre-v1; publication automation is not installed yet. Do not create, move,
-reuse, or delete release tags manually.
+must retain least-privilege permissions. Release preparation and publication are
+manual and pre-v1, with publication protected by the `release` environment. Do
+not create, move, reuse, or delete release tags manually.
 
 ## Release Sequencing
 
