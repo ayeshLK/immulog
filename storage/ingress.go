@@ -15,13 +15,14 @@
 package storage
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"runtime"
-	"sync"
 	"sync/atomic"
 	"time"
 
-	disruptor "github.com/smarty/go-disruptor"
+	"github.com/ayeshLK/immulog/api"
+	disruptor "github.com/ayeshLK/lib-disruptor"
 )
 
 const (
@@ -29,26 +30,64 @@ const (
 	maxIngressSlots    = uint32(1 << 17)
 )
 
+// ingressEvent is a reusable ring slot. The request is cleared before the
+// event is handed back to the ring so a slot never retains caller-owned data.
+type ingressEvent struct {
+	request *appendRequest
+}
+
 // partitionIngress is the only adapter over the pinned disruptor dependency.
-// A producer reserves admission before copying input, then uses TryReserve so
-// no operation can block after it has claimed a ring sequence.
+// A producer reserves admission before copying input, then publishes a request
+// through the context-aware ring claim path.
 type partitionIngress struct {
-	disruptor disruptor.Disruptor
-	slots     []*appendRequest
-	mask      int64
+	ring      *disruptor.RingBuffer[*ingressEvent]
+	processor *disruptor.BatchProcessor[*ingressEvent]
 	capacity  uint32
-	wait      *ingressWait
 	sealed    atomic.Bool
 	done      chan struct{}
 }
 
 type ingressHandler struct {
 	partition *Partition
-	ingress   *partitionIngress
+	requests  []*appendRequest
 }
 
-func (handler ingressHandler) Handle(lowerSequence, upperSequence int64) {
-	handler.partition.consumeIngress(handler.ingress, lowerSequence, upperSequence)
+func (handler *ingressHandler) Handle(event *ingressEvent, _ int64, endOfBatch bool) error {
+	request := event.request
+	event.request = nil
+	if request == nil {
+		return errors.New("ingress event had no request")
+	}
+
+	handler.partition.queueMu.Lock()
+	handler.partition.releasePublicationLocked()
+	handler.partition.queueMu.Unlock()
+	handler.requests = append(handler.requests, request)
+	if !endOfBatch {
+		return nil
+	}
+	if handler.partition.options.BatchLinger > 0 {
+		time.Sleep(handler.partition.options.BatchLinger)
+	}
+	requests := handler.requests
+	handler.partition.writeIngressBatches(requests)
+	for index := range requests {
+		requests[index] = nil
+	}
+	handler.requests = nil
+	return nil
+}
+
+func (handler *ingressHandler) failPending(cause error) {
+	requests := handler.requests
+	handler.requests = nil
+	if len(requests) == 0 {
+		return
+	}
+	resultErr := errors.Join(api.ErrAppendOutcomeUnknown, api.ErrPartitionUnavailable, cause)
+	for _, request := range requests {
+		handler.partition.complete(request, appendResult{err: resultErr})
+	}
 }
 
 func newPartitionIngress(partition *Partition) (*partitionIngress, error) {
@@ -56,27 +95,45 @@ func newPartitionIngress(partition *Partition) (*partitionIngress, error) {
 	if err != nil {
 		return nil, err
 	}
-	wait := newIngressWait()
-	ingress := &partitionIngress{
-		slots:    make([]*appendRequest, capacity),
-		mask:     int64(capacity - 1),
-		capacity: capacity,
-		wait:     wait,
-		done:     make(chan struct{}),
-	}
-	runtime, err := disruptor.New(
-		disruptor.Options.BufferCapacity(capacity),
-		disruptor.Options.WriterCount(2),
-		disruptor.Options.WaitStrategy(wait),
-		disruptor.Options.NewHandlerGroup(ingressHandler{partition: partition, ingress: ingress}),
+	ring, err := disruptor.New(
+		int64(capacity),
+		disruptor.MultiProducer,
+		func() *ingressEvent { return new(ingressEvent) },
+		disruptor.BlockingWait(),
+		disruptor.WithProducerWait(disruptor.ProducerWaitBlocking),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("create partition ingress: %w", err)
+		return nil, fmt.Errorf("create partition ingress ring: %w", err)
 	}
-	ingress.disruptor = runtime
+	handler := &ingressHandler{partition: partition}
+	processor, err := disruptor.NewBatchProcessor(
+		ring,
+		ring.NewBarrier(),
+		handler.Handle,
+		disruptor.WithMaxBatchSize(int64(capacity)),
+	)
+	if err != nil {
+		ring.Close()
+		return nil, fmt.Errorf("create partition ingress processor: %w", err)
+	}
+	ring.AddGatingSequences(processor.Sequence())
+	ingress := &partitionIngress{
+		ring:      ring,
+		processor: processor,
+		capacity:  capacity,
+		done:      make(chan struct{}),
+	}
 	go func() {
 		defer close(ingress.done)
-		runtime.Listen()
+		if err := processor.Run(context.Background()); err != nil && !errors.Is(err, disruptor.ErrClosed) {
+			handler.failPending(err)
+			partition.markIngressUnavailable(fmt.Errorf("ingress processor failed: %w", err))
+			ingress.close()
+			partition.queueMu.Lock()
+			partition.waitForPublishersLocked()
+			partition.queueMu.Unlock()
+			ingress.drainPending(partition, err)
+		}
 	}()
 	return ingress, nil
 }
@@ -96,101 +153,40 @@ func ingressCapacity(limit uint32) (uint32, error) {
 	return capacity, nil
 }
 
-func (ingress *partitionIngress) publish(request *appendRequest) error {
-	var sequence int64
-	for {
-		sequence = ingress.disruptor.TryReserve(1)
-		if sequence >= 0 {
-			break
-		}
-		runtime.Gosched()
+func (ingress *partitionIngress) publish(ctx context.Context, request *appendRequest) error {
+	sequence, err := ingress.ring.Next(ctx)
+	if err != nil {
+		return err
 	}
-	ingress.slots[sequence&ingress.mask] = request
-	ingress.disruptor.Commit(sequence, sequence)
-	ingress.wait.notify()
+	defer ingress.ring.PublishSequence(sequence)
+	ingress.ring.Get(sequence).request = request
 	return nil
 }
 
-func (ingress *partitionIngress) take(sequence int64) *appendRequest {
-	index := sequence & ingress.mask
-	request := ingress.slots[index]
-	ingress.slots[index] = nil
-	return request
-}
-
-func (ingress *partitionIngress) close() error {
+func (ingress *partitionIngress) close() {
 	ingress.sealed.Store(true)
-	ingress.wait.close()
-	return ingress.disruptor.Close()
+	ingress.ring.Close()
 }
 
-// ingressWait keeps the terminal processor and any unexpected slow-path
-// reservation asleep until a producer publishes or shutdown begins.
-type ingressWait struct {
-	mu     sync.Mutex
-	wake   chan struct{}
-	closed bool
-}
-
-func newIngressWait() *ingressWait {
-	return &ingressWait{wake: make(chan struct{}, 1)}
-}
-
-func (wait *ingressWait) Gate(int64)    { wait.await() }
-func (wait *ingressWait) Idle(int64)    { wait.await() }
-func (wait *ingressWait) Reserve(int64) { wait.await() }
-
-func (wait *ingressWait) await() {
-	<-wait.wake
-}
-
-func (wait *ingressWait) notify() {
-	wait.mu.Lock()
-	defer wait.mu.Unlock()
-	if wait.closed {
+func (ingress *partitionIngress) drainPending(partition *Partition, cause error) {
+	lower := ingress.processor.Sequence().Load() + 1
+	upper := ingress.ring.Cursor()
+	if lower > upper {
 		return
 	}
-	select {
-	case wait.wake <- struct{}{}:
-	default:
-	}
-}
-
-func (wait *ingressWait) close() {
-	wait.mu.Lock()
-	defer wait.mu.Unlock()
-	if wait.closed {
-		return
-	}
-	wait.closed = true
-	close(wait.wake)
-}
-
-func (partition *Partition) consumeIngress(ingress *partitionIngress, lowerSequence, upperSequence int64) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			partition.markIngressUnavailable(fmt.Errorf("ingress handler panic: %v", recovered))
-		}
-	}()
-	requests := make([]*appendRequest, 0, upperSequence-lowerSequence+1)
-	for sequence := lowerSequence; sequence <= upperSequence; sequence++ {
-		request := ingress.take(sequence)
+	resultErr := errors.Join(api.ErrAppendOutcomeUnknown, api.ErrPartitionUnavailable, cause)
+	for sequence := lower; sequence <= upper; sequence++ {
+		event := ingress.ring.Get(sequence)
+		request := event.request
+		event.request = nil
 		if request == nil {
-			partition.markIngressUnavailable(fmt.Errorf("ingress sequence %d had no request", sequence))
 			continue
 		}
 		partition.queueMu.Lock()
 		partition.releasePublicationLocked()
 		partition.queueMu.Unlock()
-		requests = append(requests, request)
+		partition.complete(request, appendResult{err: resultErr})
 	}
-	if len(requests) == 0 {
-		return
-	}
-	if partition.options.BatchLinger > 0 {
-		time.Sleep(partition.options.BatchLinger)
-	}
-	partition.writeIngressBatches(requests)
 }
 
 func (partition *Partition) writeIngressBatches(requests []*appendRequest) {

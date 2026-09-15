@@ -230,6 +230,15 @@ func (p *Partition) finishPublisher() {
 	p.queueMu.Unlock()
 }
 
+func (p *Partition) waitForPublishersLocked() {
+	for p.publishing != 0 {
+		wake := p.publisherWake
+		p.queueMu.Unlock()
+		<-wake
+		p.queueMu.Lock()
+	}
+}
+
 func (p *Partition) admit(ctx context.Context, request *appendRequest) error {
 	for {
 		p.queueMu.Lock()
@@ -299,7 +308,7 @@ func (p *Partition) admit(ctx context.Context, request *appendRequest) error {
 	}
 }
 
-func (p *Partition) enqueue(request *appendRequest) error {
+func (p *Partition) enqueue(ctx context.Context, request *appendRequest) error {
 	p.queueMu.Lock()
 	if p.queueClosed {
 		p.releaseReservationLocked(request)
@@ -320,10 +329,13 @@ func (p *Partition) enqueue(request *appendRequest) error {
 	p.queueMu.Unlock()
 	defer p.finishPublisher()
 
-	if err := p.ingress.publish(request); err != nil {
+	if err := p.ingress.publish(ctx, request); err != nil {
 		p.queueMu.Lock()
 		p.releaseReservationLocked(request)
 		p.queueMu.Unlock()
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		p.markIngressUnavailable(err)
 		return errors.Join(api.ErrPartitionUnavailable, err)
 	}
@@ -423,7 +435,7 @@ func (p *Partition) Append(ctx context.Context, request api.AppendRequest) (api.
 		return api.Record{}, err
 	}
 	prepared.record = p.copyRequest(request)
-	if err := p.enqueue(prepared); err != nil {
+	if err := p.enqueue(ctx, prepared); err != nil {
 		disk.release()
 		p.recordAdmissionOutcome(err)
 		return api.Record{}, err
@@ -521,12 +533,7 @@ func (p *Partition) closeWriter() error {
 	close(p.closingSignal)
 	p.signalQueueLocked()
 	p.signalSpaceLocked()
-	for p.publishing != 0 {
-		wake := p.publisherWake
-		p.queueMu.Unlock()
-		<-wake
-		p.queueMu.Lock()
-	}
+	p.waitForPublishersLocked()
 	ingress := p.ingress
 	p.queueMu.Unlock()
 
@@ -538,8 +545,9 @@ func (p *Partition) closeWriter() error {
 
 	var closeErr error
 	if ingress != nil {
-		closeErr = errors.Join(closeErr, ingress.close())
+		ingress.close()
 		<-ingress.done
+		ingress.drainPending(p, api.ErrPartitionUnavailable)
 	}
 	p.mu.Lock()
 	if !p.closed {
