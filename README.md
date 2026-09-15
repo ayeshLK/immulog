@@ -157,6 +157,8 @@ operation or consumer handler; do not retain internal references.
   and shut down safely.
 - [Contributing](CONTRIBUTING.md): development setup, validation commands,
   pull-request expectations, and release hygiene.
+- [Benchmark evidence](BENCHMARKS.md): reproducible performance commands,
+  dated results, soak metrics, and qualification limits.
 - [Security policy](SECURITY.md): private vulnerability reporting and the
   library's security boundary.
 - [Code of Conduct](CODE_OF_CONDUCT.md): expectations for respectful project
@@ -175,8 +177,9 @@ go test -race ./...
 ```
 
 Fuzzing, benchmark, and the mixed-workload soak are intentionally separate
-from ordinary CI. Their commands and qualification notes are in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+from ordinary CI. Their commands are in [CONTRIBUTING.md](CONTRIBUTING.md),
+and benchmark interpretation and results are in
+[BENCHMARKS.md](BENCHMARKS.md).
 
 ## License
 

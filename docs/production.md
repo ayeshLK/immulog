@@ -270,7 +270,9 @@ through the private process in [SECURITY.md](../SECURITY.md), not a public issue
 ## Operational validation
 
 Before a production rollout, run the normal checks and the workload-specific
-checks that match the deployment:
+checks that match the deployment. See [Benchmark evidence](../BENCHMARKS.md)
+for reproducible commands, environment capture, interpretation guidance, and
+qualification limits:
 
 ```sh
 go test ./...

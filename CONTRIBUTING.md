@@ -7,7 +7,8 @@ Thank you for helping improve `immulog`.
 Start with the [README](README.md) for the project scope and quick start. The
 [usage guide](docs/usage.md) covers the public API, while the [production
 guide](docs/production.md) covers durability, recovery, capacity, retention,
-and operations. Please also follow the [Code of Conduct](CODE_OF_CONDUCT.md)
+and operations. Read [Benchmark evidence](BENCHMARKS.md) before running or
+interpreting performance measurements. Please also follow the [Code of Conduct](CODE_OF_CONDUCT.md)
 when participating in issues, pull requests, and reviews.
 
 ## Development setup
@@ -39,7 +40,8 @@ go test ./storage -run '^$' -fuzz=FuzzDecodeSegmentHeader -fuzztime=60m -paralle
 go test ./storage -run '^$' -fuzz=FuzzPreflightSystemLogSegment -fuzztime=60m -parallel=1
 ```
 
-Performance evidence is collected by the manual workflow or with:
+Performance evidence is collected by the manual workflow or with the commands
+in [BENCHMARKS.md](BENCHMARKS.md):
 
 ```sh
 go test ./perf/benchmarks -run '^$' -bench .
