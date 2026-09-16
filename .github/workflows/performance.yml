@@ -42,9 +42,12 @@ jobs:
         run: |
           mkdir -p perf-results
           go version > perf-results/environment.txt
-          go env -json GOOS GOARCH GOAMD64 > perf-results/go-env.json
+          go env -json GOOS GOARCH GOAMD64 GOMAXPROCS > perf-results/go-env.json
           uname -a >> perf-results/environment.txt
+          grep -m1 'model name' /proc/cpuinfo >> perf-results/environment.txt
           nproc >> perf-results/environment.txt
+          findmnt -T . >> perf-results/environment.txt
+          df -T . >> perf-results/environment.txt
           git rev-parse HEAD >> perf-results/environment.txt
       - name: Run microbenchmarks
         shell: bash

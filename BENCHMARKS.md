@@ -9,17 +9,22 @@ separate qualification record explicitly says otherwise.
 
 ### Durable append benchmarks
 
-The `perf/benchmarks` package contains two like-for-like reference paths:
+The `perf/benchmarks` package covers separate workload classes:
 
-- `BenchmarkIngressAppend` exercises the concurrent partition ingress ring and
-  terminal durable writer through `Partition.Append`.
-- `BenchmarkDirectAppendBatch` exercises the synchronous durable writer through
-  `Partition.AppendBatch` for one record at a time.
+- `BenchmarkIngressAppend` measures one-record durable append latency through
+  `Partition.Append`.
+- `BenchmarkIngressAppendParallel` varies producer count and payload size while
+  exercising the bounded ingress ring and terminal writer.
+- `BenchmarkDirectAppendBatch` varies records per batch and payload size through
+  `Partition.AppendBatch`.
+- `BenchmarkFetch` compares segment reads with rebuildable tail-cache hits.
+- `BenchmarkFetchParallel` exercises concurrent independent readers.
 
-Both benchmarks use a temporary store, one partition, `BatchRecords: 1`,
-`BatchBytes: 4096`, and `SegmentBytes: 8192`. Each operation includes the
-normal filesystem-backed append and synchronization path; these are not
-in-memory queue measurements.
+Append cases use 64 MiB segments for steady-state throughput unless a benchmark
+explicitly targets segment rolling. Each operation includes the normal
+filesystem-backed append and synchronization path; these are not in-memory
+queue measurements. Results must distinguish per-record durable latency from
+batched records/sec and encoded MiB/sec.
 
 ### Mixed workload soak
 
@@ -38,8 +43,20 @@ observations and may overlap those outcome counters.
 Run the repository microbenchmarks with repeated samples:
 
 ```sh
-go test ./perf/benchmarks -run '^$' -bench . -benchmem -count=3
+go test ./perf/benchmarks -run '^$' -bench . -benchmem -benchtime=5s -count=5
+go test ./perf/benchmarks -run '^$' -bench . -benchmem -cpu 1,2,4,8 -count=3
 ```
+
+Use focused runs while iterating:
+
+```sh
+go test ./perf/benchmarks -run '^$' -bench 'BenchmarkIngressAppendParallel|BenchmarkDirectAppendBatch' -benchmem -benchtime=1s -count=1
+```
+
+Every benchmark must validate the final durable end and report its workload
+parameters. Use `b.SetBytes` for payload bandwidth and report records/sec for
+record throughput. Treat setup, reopen, retention, and verification as separate
+lifecycle measurements rather than including them in steady-state throughput.
 
 The manual GitHub Actions workflow in
 `.github/workflows/performance.yml` accepts `benchtime` and `benchmark_count`
@@ -166,6 +183,9 @@ large generated profiles or raw output files; attach them as workflow artifacts
 or retain them with the qualification run.
 
 ## Qualification limits
+
+The recorded migration smoke predates the expanded benchmark matrix and is not
+comparable to current results. It does not establish a high-performance target.
 
 The recorded migration smoke does not replace:
 
