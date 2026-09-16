@@ -224,13 +224,13 @@ func remainingDiskCapacity(available, debit uint64) uint64 {
 }
 
 func estimateDiskBatchGrowth(encodedBytes uint64) (uint64, uint64, error) {
-	overhead := uint64(SegmentHeaderBytes) + 2*(uint64(IndexHeaderBytes)+uint64(OffsetIndexEntryBytes)+uint64(TimeIndexEntryBytes))
+	overhead := uint64(SegmentHeaderBytes)
 	if encodedBytes > ^uint64(0)-overhead {
 		return 0, 0, errors.Join(api.ErrDiskPressure, errors.New("disk growth estimate overflows"))
 	}
-	// A roll can create a segment and two indexes while an index replacement
-	// temporarily owns an additional inode.
-	return encodedBytes + overhead, 4, nil
+	// A roll can create one new authoritative segment. Derived index files are
+	// lifecycle checkpoints and are not part of per-append admission.
+	return encodedBytes + overhead, 1, nil
 }
 
 func (store *Store) reserveDiskUser(bytes, inodes uint64) (*diskReservation, error) {

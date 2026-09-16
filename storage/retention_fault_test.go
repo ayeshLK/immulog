@@ -73,7 +73,7 @@ func TestRetentionDirectorySyncFailurePreservesBoundary(t *testing.T) {
 	plan := &filesystemFaultPlan{}
 	installFilesystemFault(t, plan)
 	store, partition, descriptor := openRetentionFaultFixture(t)
-	plan.failOnceExactAfter(filesystemSync, partition.dir, 1, errors.New("injected retention directory sync failure"))
+	plan.failOnceExactAfter(filesystemSync, partition.dir, 3, errors.New("injected retention directory sync failure"))
 	if err := store.runRetentionAt(context.Background(), time.Now()); err == nil {
 		t.Fatal("retention unexpectedly succeeded")
 	}

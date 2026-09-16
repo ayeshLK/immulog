@@ -56,6 +56,58 @@ func TestStoreCloseDoesNotDeadlockWithRetentionWorker(t *testing.T) {
 	}
 }
 
+func TestRetentionRollPublishesOnlyTheFormerActiveSegment(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := PartitionOptions{
+		RetentionTimeEnabled: true,
+		RetentionDuration:    time.Hour,
+		MaxSegmentAge:        time.Millisecond,
+		RetentionCheck:       time.Hour,
+		IndexStride:          1,
+	}
+	descriptor, err := store.CreateTopic("retention-roll-index", 1, options)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	partitions, err := store.OpenTopic(descriptor.Name)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	partition := partitions[0]
+	if _, err := partition.Append(context.Background(), api.AppendRequest{Topic: descriptor.ID, Partition: 0, Value: []byte("value")}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	priorPath := partition.segments[0].path
+	if err := store.runRetentionAt(context.Background(), time.Now().Add(2*time.Millisecond)); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if len(partition.segments) != 2 {
+		_ = store.Close()
+		t.Fatalf("segment count after retention roll = %d, want 2", len(partition.segments))
+	}
+	for _, timeIndex := range []bool{false, true} {
+		if _, err := os.Stat(indexPath(priorPath, timeIndex)); err != nil {
+			_ = store.Close()
+			t.Fatalf("former active index (time=%t) = %v", timeIndex, err)
+		}
+		if _, err := os.Stat(indexPath(partition.segments[1].path, timeIndex)); !os.IsNotExist(err) {
+			_ = store.Close()
+			t.Fatalf("new active index exists before close (time=%t): %v", timeIndex, err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSizeRetentionPublishesBoundaryCleansArtifactsAndReopens(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir)

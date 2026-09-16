@@ -30,6 +30,19 @@ func testDiskOptions() StoreOptions {
 	}
 }
 
+func TestEstimateDiskBatchGrowthExcludesDerivedIndexes(t *testing.T) {
+	bytes, inodes, err := estimateDiskBatchGrowth(123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := uint64(123) + uint64(SegmentHeaderBytes); bytes != want {
+		t.Fatalf("estimated bytes = %d, want %d", bytes, want)
+	}
+	if inodes != 1 {
+		t.Fatalf("estimated inodes = %d, want 1", inodes)
+	}
+}
+
 func TestDiskPressureLedgerSharesDebitsAndHysteresis(t *testing.T) {
 	options := testDiskOptions()
 	ledger, err := newDiskPressureLedger(options, func() (diskObservation, error) {

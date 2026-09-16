@@ -551,6 +551,9 @@ func (p *Partition) closeWriter() error {
 	}
 	p.mu.Lock()
 	if !p.closed {
+		for _, segment := range p.segments {
+			_ = installSegmentIndexes(segment, p.storeID, p.options.IndexStride)
+		}
 		p.closed = true
 		p.signalFetchWaitersLocked()
 		for _, segment := range p.segments {

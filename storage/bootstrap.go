@@ -377,7 +377,7 @@ func newStoreID() (StoreID, error) {
 
 func rebindIndexes(partition *Partition) {
 	for _, segment := range partition.segments {
-		_ = installSegmentIndexes(segment, partition.storeID, partition.options.IndexStride)
+		loadOrBuildIndexes(segment, partition.storeID, partition.options.IndexStride)
 	}
 }
 

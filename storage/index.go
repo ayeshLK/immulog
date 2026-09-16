@@ -458,20 +458,20 @@ func loadOrBuildIndexes(segment *segment, storeID StoreID, stride uint64) {
 		}
 	}
 	if segment.offsetIndex == nil || segment.timeIndex == nil {
-		if err := installSegmentIndexes(segment, storeID, stride); err == nil {
-			return
+		offsetEntries, timeEntries := sampleBatchIndexes(segment.batches, stride)
+		if segment.offsetIndex == nil {
+			segment.offsetIndex = offsetEntries
 		}
-	}
-	if segment.offsetIndex == nil {
-		segment.offsetIndex = []offsetIndexEntry{}
-	}
-	if segment.timeIndex == nil {
-		segment.timeIndex = []timeIndexEntry{}
+		if segment.timeIndex == nil {
+			segment.timeIndex = timeEntries
+		}
 	}
 }
 
-func refreshSegmentIndexes(segment *segment, storeID StoreID, stride uint64) {
-	// Indexes are derived caches. A failed refresh leaves the previous validated
-	// view in place and the reader remains correct by scanning the log.
-	_ = installSegmentIndexes(segment, storeID, stride)
+func refreshSegmentIndexes(segment *segment, _ StoreID, stride uint64) {
+	// Indexes are derived caches. Keep the in-memory view current while allowing
+	// persisted sidecars to lag until a lifecycle checkpoint.
+	offsetEntries, timeEntries := sampleBatchIndexes(segment.batches, stride)
+	segment.offsetIndex = offsetEntries
+	segment.timeIndex = timeEntries
 }
