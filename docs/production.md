@@ -63,6 +63,12 @@ The same rule applies to catalog and consumer-offset mutations. An unknown
 metadata or commit outcome is not evidence that the durable event did not
 exist.
 
+`BatchLinger` is zero by default and disables timed acquisition. A positive
+value allows the ingress processor to collect newly published contiguous
+requests after the first available request, up to the configured processor
+batch limit. Appends remain synchronous: successful calls return only after the
+formed durable batch is written and synchronized.
+
 ## Plan capacity before opening traffic
 
 `PartitionOptions` defines persisted writer and retention settings for a new
@@ -72,7 +78,7 @@ catalog topic. The important bounds are:
 - `BatchBytes` and `BatchRecords` bound encoded batches;
 - `RecordBytes` bounds one record;
 - `InFlightBytes`, `InFlightRecords`, and `AdmissionWaiters` bound admission;
-- `BatchLinger` can coalesce already-admitted ingress requests; and
+- `BatchLinger` bounds the ingress processor's timed acquisition window; and
 - `TailSlots` and `TailBytes` enable an optional, rebuildable in-memory tail.
 
 `StoreOptions` applies instance-only limits for topics, user partitions, open

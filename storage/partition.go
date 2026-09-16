@@ -36,8 +36,8 @@ import (
 const defaultSegmentBytes = uint64(SegmentHeaderBytes) + uint64(MaxBatchBytes)
 
 // Writer limits are finite operating settings; zero selects the documented
-// baseline profile. BatchLinger bounds how long the direct writer waits to
-// coalesce already admitted requests.
+// baseline profile. BatchLinger bounds how long ingress waits to collect
+// newly published requests after the first request is available.
 // PartitionOptions controls the bounded segment size and initial retained
 // offset for a newly created partition. Existing files determine recovery
 // state; options do not rewrite them.

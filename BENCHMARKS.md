@@ -15,6 +15,8 @@ The `perf/benchmarks` package covers separate workload classes:
   `Partition.Append`.
 - `BenchmarkIngressAppendParallel` varies producer count and payload size while
   exercising the bounded ingress ring and terminal writer.
+- `BenchmarkIngressBatchLinger` compares zero and positive upstream timed
+  acquisition windows across producer counts.
 - `BenchmarkDirectAppendBatch` varies records per batch and payload size through
   `Partition.AppendBatch`.
 - `BenchmarkFetch` compares segment reads with rebuildable tail-cache hits.
@@ -24,7 +26,10 @@ Append cases use 64 MiB segments for steady-state throughput unless a benchmark
 explicitly targets segment rolling. Each operation includes the normal
 filesystem-backed append and synchronization path; these are not in-memory
 queue measurements. Results must distinguish per-record durable latency from
-batched records/sec and encoded MiB/sec.
+batched records/sec and encoded MiB/sec. Positive `BatchLinger` values are
+lib-disruptor timed acquisition windows; the writer still synchronizes each
+formed immulog batch, so this benchmark must report `syncOps` rather than imply
+group-commit fsync reduction.
 
 ### Mixed workload soak
 
