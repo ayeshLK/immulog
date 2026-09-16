@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
-	"time"
 
 	"github.com/ayeshLK/immulog/api"
 	disruptor "github.com/ayeshLK/lib-disruptor"
@@ -66,9 +65,6 @@ func (handler *ingressHandler) Handle(event *ingressEvent, _ int64, endOfBatch b
 	if !endOfBatch {
 		return nil
 	}
-	if handler.partition.options.BatchLinger > 0 {
-		time.Sleep(handler.partition.options.BatchLinger)
-	}
 	requests := handler.requests
 	handler.partition.writeIngressBatches(requests)
 	for index := range requests {
@@ -106,11 +102,17 @@ func newPartitionIngress(partition *Partition) (*partitionIngress, error) {
 		return nil, fmt.Errorf("create partition ingress ring: %w", err)
 	}
 	handler := &ingressHandler{partition: partition}
+	processorOptions := []disruptor.ProcessorOption{
+		disruptor.WithMaxBatchSize(int64(capacity)),
+	}
+	if partition.options.BatchLinger > 0 {
+		processorOptions = append(processorOptions, disruptor.WithBatchTimeout(partition.options.BatchLinger))
+	}
 	processor, err := disruptor.NewBatchProcessor(
 		ring,
 		ring.NewBarrier(),
 		handler.Handle,
-		disruptor.WithMaxBatchSize(int64(capacity)),
+		processorOptions...,
 	)
 	if err != nil {
 		ring.Close()

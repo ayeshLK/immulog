@@ -115,7 +115,7 @@ not create, move, reuse, or delete release tags manually.
 
 The immediate goal is a pre-v1 release; do not block current hardening on
 freezing the eventual v1 contract. The ingress adapter uses the released
-`github.com/ayeshLK/lib-disruptor v0.4.0`. Future dependency upgrades remain
+`github.com/ayeshLK/lib-disruptor v0.6.0`. Future dependency upgrades remain
 subject to the same adapter, durability, cancellation, lifecycle, and
 performance requalification gates.
 

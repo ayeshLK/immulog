@@ -69,8 +69,8 @@ func BenchmarkIngressAppendParallel(b *testing.B) {
 	}
 }
 
-// BenchmarkDirectAppendBatch measures synchronous durable batches without
-// adding an EndOffset call to each timed iteration.
+// BenchmarkIngressBatchLinger measures upstream timed acquisition on the
+// bounded ingress path without adding an EndOffset call to each iteration.
 func BenchmarkIngressBatchLinger(b *testing.B) {
 	for _, producers := range []int{8, 32, 64} {
 		for _, linger := range []time.Duration{0, 100 * time.Microsecond, time.Millisecond, 5 * time.Millisecond} {
@@ -101,6 +101,8 @@ func BenchmarkIngressBatchLinger(b *testing.B) {
 	}
 }
 
+// BenchmarkDirectAppendBatch measures synchronous durable batches without
+// adding an EndOffset call to each timed iteration.
 func BenchmarkDirectAppendBatch(b *testing.B) {
 	for _, batchRecords := range []uint32{1, 8, 64, 256} {
 		for _, payloadSize := range []int{256, 1024, 4096} {

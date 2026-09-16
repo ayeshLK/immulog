@@ -43,6 +43,17 @@ func waitForIngressState(t *testing.T, partition *Partition, ready func(admitted
 	t.Fatal("timed out waiting for ingress state")
 }
 
+func TestBatchLingerRejectsNegativeDuration(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.OpenPartition(testTopic(), 0, PartitionOptions{BatchLinger: -time.Nanosecond}); !errors.Is(err, api.ErrInvalidArgument) {
+		t.Fatalf("negative batch linger error = %v, want ErrInvalidArgument", err)
+	}
+}
+
 func TestIngressEnqueueCancellationWhileRingIsFull(t *testing.T) {
 	ring, err := disruptor.New(
 		int64(1),
@@ -212,6 +223,50 @@ func TestIngressSaturationBoundsWaiters(t *testing.T) {
 	}
 }
 
+func TestIngressBatchTimeoutCollectsPublishedRequests(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	topic := testTopic()
+	partition, err := store.OpenPartition(topic, 0, PartitionOptions{
+		BatchLinger:     500 * time.Millisecond,
+		BatchRecords:    8,
+		InFlightBytes:   4096,
+		InFlightRecords: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendAsync := func(value string) <-chan error {
+		result := make(chan error, 1)
+		go func() {
+			_, err := partition.Append(context.Background(), api.AppendRequest{Topic: topic, Partition: 0, Value: []byte(value)})
+			result <- err
+		}()
+		return result
+	}
+
+	first := appendAsync("first")
+	waitForIngressState(t, partition, func(admitted, credits, publishers, _ uint32) bool {
+		return admitted == 1 && credits == 1 && publishers == 0
+	})
+	second := appendAsync("second")
+	if err := <-first; err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("second append: %v", err)
+	}
+	if end, err := partition.EndOffset(); err != nil || end != 2 {
+		t.Fatalf("end offset = (%d, %v), want (2, nil)", end, err)
+	}
+	if operations := partition.Stats().SyncLatency.Operations; operations != 1 {
+		t.Fatalf("sync operations = %d, want one timed ingress batch", operations)
+	}
+}
+
 func TestIngressClearsSlotsAndTransfersCredits(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {
@@ -298,6 +353,8 @@ func TestIngressCancellationAfterPublicationIsUnknown(t *testing.T) {
 }
 
 func TestIngressWriteFailureFencesNewAppends(t *testing.T) {
+	plan := &filesystemFaultPlan{}
+	installFilesystemFault(t, plan)
 	store, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -305,25 +362,21 @@ func TestIngressWriteFailureFencesNewAppends(t *testing.T) {
 	defer func() { _ = store.Close() }()
 	topic := testTopic()
 	partition, err := store.OpenPartition(topic, 0, PartitionOptions{
-		BatchLinger:     250 * time.Millisecond,
 		InFlightBytes:   1024,
 		InFlightRecords: 2,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	partition.mu.RLock()
+	activePath := partition.segments[len(partition.segments)-1].path
+	partition.mu.RUnlock()
+	plan.failOnceExact(filesystemWriteAt, activePath, errors.New("injected ingress write failure"))
 	result := make(chan error, 1)
 	go func() {
 		_, err := partition.Append(context.Background(), api.AppendRequest{Topic: topic, Partition: 0, Value: []byte("fails")})
 		result <- err
 	}()
-	waitForIngressState(t, partition, func(admitted, credits, _, _ uint32) bool { return admitted == 1 && credits == 0 })
-	partition.mu.Lock()
-	closeErr := partition.segments[len(partition.segments)-1].file.Close()
-	partition.mu.Unlock()
-	if closeErr != nil {
-		t.Fatalf("close active segment for fault injection: %v", closeErr)
-	}
 	if err := <-result; !errors.Is(err, api.ErrAppendOutcomeUnknown) || !errors.Is(err, api.ErrPartitionUnavailable) {
 		t.Fatalf("failed append error = %v, want unknown partition-unavailable outcome", err)
 	}
