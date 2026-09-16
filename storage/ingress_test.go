@@ -341,7 +341,9 @@ func TestIngressCancellationAfterPublicationIsUnknown(t *testing.T) {
 		_, err := partition.Append(ctx, api.AppendRequest{Topic: topic, Partition: 0, Value: []byte("published")})
 		result <- err
 	}()
-	waitForIngressState(t, partition, func(admitted, credits, _, _ uint32) bool { return admitted == 1 && credits == 0 })
+	waitForIngressState(t, partition, func(admitted, credits, publishers, _ uint32) bool {
+		return admitted == 1 && credits == 1 && publishers == 0
+	})
 	cancel()
 	if err := <-result; !errors.Is(err, api.ErrAppendOutcomeUnknown) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled published append = %v, want unknown context cancellation", err)
