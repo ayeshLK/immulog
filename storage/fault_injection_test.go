@@ -469,6 +469,85 @@ func TestSegmentRollPublicationFaultsPreservePriorRecord(t *testing.T) {
 	}
 }
 
+func TestIndexCheckpointFaultsDoNotAffectAppend(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation filesystemOperation
+	}{
+		{name: "write", operation: filesystemWrite},
+		{name: "sync", operation: filesystemSync},
+		{name: "rename", operation: filesystemRename},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plan := &filesystemFaultPlan{}
+			installFilesystemFault(t, plan)
+			_, store, partition := openFaultPartition(t, PartitionOptions{
+				SegmentBytes: uint64(SegmentHeaderBytes) + uint64(encodedBatchLength(indexedBatch(testTopic(), 0, 0, 1, "value"))) + 1,
+				BatchBytes:   4096,
+				BatchRecords: 1,
+				RecordBytes:  1024,
+				IndexStride:  1,
+			})
+			first := indexedBatch(testTopic(), 0, 0, 1, "value")
+			if _, err := partition.AppendBatch(first); err != nil {
+				_ = store.Close()
+				t.Fatal(err)
+			}
+			plan.failOnce(test.operation, ".index-", fmt.Errorf("injected index %s failure", test.name))
+			if _, err := partition.AppendBatch(indexedBatch(testTopic(), 0, 1, 2, "value")); err != nil {
+				t.Fatalf("append with index checkpoint failure = %v", err)
+			}
+			if !plan.triggered() {
+				t.Fatal("index checkpoint fault was not triggered")
+			}
+			if got, err := partition.EndOffset(); err != nil || got != 2 {
+				t.Fatalf("durable end after index failure = (%d, %v), want (2, nil)", got, err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestIndexCheckpointFaultsDoNotAffectClose(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation filesystemOperation
+	}{
+		{name: "write", operation: filesystemWrite},
+		{name: "sync", operation: filesystemSync},
+		{name: "rename", operation: filesystemRename},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plan := &filesystemFaultPlan{}
+			installFilesystemFault(t, plan)
+			_, store, partition := openFaultPartition(t, PartitionOptions{IndexStride: 1})
+			if _, err := partition.AppendBatch(indexedBatch(testTopic(), 0, 0, 1, "value")); err != nil {
+				_ = store.Close()
+				t.Fatal(err)
+			}
+			plan.failOnce(test.operation, ".index-", fmt.Errorf("injected close index %s failure", test.name))
+			if err := store.Close(); err != nil {
+				t.Fatalf("close with index checkpoint failure = %v", err)
+			}
+			if !plan.triggered() {
+				t.Fatal("close index checkpoint fault was not triggered")
+			}
+		})
+	}
+}
+
+func encodedBatchLength(batch api.RecordBatch) int {
+	encoded, err := EncodeBatch(batch)
+	if err != nil {
+		panic(err)
+	}
+	return len(encoded)
+}
+
 func TestSnapshotPublicationFaultsKeepPreviousCache(t *testing.T) {
 	tests := []struct {
 		name      string

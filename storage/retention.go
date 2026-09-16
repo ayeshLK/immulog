@@ -271,6 +271,9 @@ func planRetentionLocked(partition *Partition, config PartitionConfigV1, nowMill
 			partition.signalFetchWaitersLocked()
 			return nil, errors.Join(api.ErrPartitionUnavailable, err)
 		}
+		// The prior active segment is immutable after the roll. Its indexes
+		// can be checkpointed without affecting the retention boundary.
+		_ = installSegmentIndexes(active, partition.storeID, partition.options.IndexStride)
 		partition.segments = append(partition.segments, rolled)
 		if total > math.MaxUint64-uint64(rolled.size) {
 			return nil, errors.Join(api.ErrResourceLimit, errors.New("retained segment bytes overflow"))

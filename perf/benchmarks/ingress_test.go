@@ -16,27 +16,105 @@ package benchmarks
 
 import (
 	"context"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ayeshLK/immulog/api"
 	"github.com/ayeshLK/immulog/storage"
 )
 
-// BenchmarkIngressAppend is the selected multi-producer terminal-writer path.
-// Compare it with BenchmarkDirectAppendBatch when qualifying dependency changes
-// or operating profiles; neither benchmark substitutes for crash/recovery tests.
+const (
+	benchmarkSegmentBytes = uint64(64 << 20)
+	benchmarkBatchBytes   = uint32(4 << 20)
+	benchmarkTotalRecords = uint64(4096)
+)
+
+// BenchmarkIngressAppend measures one-record durable append latency. It is a
+// baseline for the public Append path, not a multi-producer throughput test.
 func BenchmarkIngressAppend(b *testing.B) {
-	store, err := storage.Open(b.TempDir())
-	if err != nil {
-		b.Fatal(err)
+	benchmarkIngressAppend(b, 1, 256, benchmarkSegmentBytes)
+}
+
+// BenchmarkIngressAppendParallel measures the bounded ingress path with an
+// explicit producer count and enough batch capacity for coalescing.
+func BenchmarkIngressAppendParallel(b *testing.B) {
+	for _, producers := range []int{1, 2, 4, 8} {
+		for _, payloadSize := range []int{64, 256, 1024, 4096} {
+			b.Run(fmt.Sprintf("producers-%d/payload-%d", producers, payloadSize), func(b *testing.B) {
+				payload := benchmarkPayload(payloadSize)
+				partition, topic, store := benchmarkPartition(b, storage.PartitionOptions{
+					BatchBytes:       benchmarkBatchBytes,
+					BatchRecords:     256,
+					SegmentBytes:     benchmarkSegmentBytes,
+					InFlightBytes:    32 << 20,
+					InFlightRecords:  4096,
+					AdmissionWaiters: 256,
+				})
+				defer store.Close()
+				b.SetBytes(int64(payloadSize))
+				b.ReportAllocs()
+				b.ResetTimer()
+				err := runConcurrentAppends(b, partition, topic, payload, producers)
+				b.StopTimer()
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkCheckDurableEnd(b, partition, uint64(b.N))
+				benchmarkReportThroughput(b, uint64(b.N))
+			})
+		}
 	}
-	b.Cleanup(func() { _ = store.Close() })
-	topic := benchmarkTopic()
-	partition, err := store.OpenPartition(topic, 0, storage.PartitionOptions{BatchRecords: 1, BatchBytes: 4096, SegmentBytes: 8192})
-	if err != nil {
-		b.Fatal(err)
+}
+
+// BenchmarkDirectAppendBatch measures synchronous durable batches without
+// adding an EndOffset call to each timed iteration.
+func BenchmarkDirectAppendBatch(b *testing.B) {
+	for _, batchRecords := range []uint32{1, 8, 64, 256} {
+		for _, payloadSize := range []int{256, 1024, 4096} {
+			b.Run(fmt.Sprintf("records-%d/payload-%d", batchRecords, payloadSize), func(b *testing.B) {
+				payload := benchmarkPayload(payloadSize)
+				partition, topic, store := benchmarkPartition(b, storage.PartitionOptions{
+					BatchBytes:   benchmarkBatchBytes,
+					BatchRecords: batchRecords,
+					SegmentBytes: benchmarkSegmentBytes,
+				})
+				defer store.Close()
+				records := benchmarkRecords(topic, 0, batchRecords, payload)
+				b.SetBytes(int64(batchRecords) * int64(payloadSize))
+				b.ReportAllocs()
+				b.ResetTimer()
+				var nextOffset uint64
+				for index := 0; index < b.N; index++ {
+					for recordIndex := range records {
+						records[recordIndex].Offset = nextOffset + uint64(recordIndex)
+					}
+					if _, err := partition.AppendBatch(api.RecordBatch{
+						Topic: topic, Partition: 0, BaseOffset: nextOffset, Records: records,
+					}); err != nil {
+						b.Fatal(err)
+					}
+					nextOffset += uint64(batchRecords)
+				}
+				b.StopTimer()
+				benchmarkCheckDurableEnd(b, partition, nextOffset)
+				benchmarkReportThroughput(b, nextOffset)
+			})
+		}
 	}
-	request := api.AppendRequest{Topic: topic, Partition: 0, Value: []byte("benchmark")}
+}
+
+func benchmarkIngressAppend(b *testing.B, batchRecords uint32, payloadSize int, segmentBytes uint64) {
+	payload := benchmarkPayload(payloadSize)
+	partition, topic, store := benchmarkPartition(b, storage.PartitionOptions{
+		BatchBytes:   benchmarkBatchBytes,
+		BatchRecords: batchRecords,
+		SegmentBytes: segmentBytes,
+	})
+	defer store.Close()
+	request := api.AppendRequest{Topic: topic, Partition: 0, Value: payload}
+	b.SetBytes(int64(payloadSize))
 	b.ReportAllocs()
 	b.ResetTimer()
 	for index := 0; index < b.N; index++ {
@@ -44,32 +122,90 @@ func BenchmarkIngressAppend(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+	b.StopTimer()
+	benchmarkCheckDurableEnd(b, partition, uint64(b.N))
+	benchmarkReportThroughput(b, uint64(b.N))
 }
 
-// BenchmarkDirectAppendBatch retains a direct synchronous writer reference for
-// like-for-like one-record durability comparisons with the ingress adapter.
-func BenchmarkDirectAppendBatch(b *testing.B) {
+func runConcurrentAppends(b *testing.B, partition *storage.Partition, topic api.TopicID, payload []byte, producers int) error {
+	var next atomic.Uint64
+	var firstErr error
+	var errOnce sync.Once
+	var workers sync.WaitGroup
+	workers.Add(producers)
+	for range producers {
+		go func() {
+			defer workers.Done()
+			request := api.AppendRequest{Topic: topic, Partition: 0, Value: payload}
+			for {
+				index := next.Add(1)
+				if index > uint64(b.N) {
+					return
+				}
+				if _, err := partition.Append(context.Background(), request); err != nil {
+					errOnce.Do(func() { firstErr = err })
+					return
+				}
+			}
+		}()
+	}
+	workers.Wait()
+	return firstErr
+}
+
+func benchmarkPartition(b *testing.B, options storage.PartitionOptions) (*storage.Partition, api.TopicID, *storage.Store) {
+	b.Helper()
 	store, err := storage.Open(b.TempDir())
 	if err != nil {
 		b.Fatal(err)
 	}
-	b.Cleanup(func() { _ = store.Close() })
 	topic := benchmarkTopic()
-	partition, err := store.OpenPartition(topic, 0, storage.PartitionOptions{BatchRecords: 1, BatchBytes: 4096, SegmentBytes: 8192})
+	partition, err := store.OpenPartition(topic, 0, options)
 	if err != nil {
+		store.Close()
 		b.Fatal(err)
 	}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for index := 0; index < b.N; index++ {
-		base, err := partition.EndOffset()
-		if err != nil {
-			b.Fatal(err)
+	return partition, topic, store
+}
+
+func benchmarkPayload(size int) []byte {
+	payload := make([]byte, size)
+	for index := range payload {
+		payload[index] = byte(index)
+	}
+	return payload
+}
+
+func benchmarkRecords(topic api.TopicID, partition uint32, count uint32, payload []byte) []api.Record {
+	records := make([]api.Record, count)
+	for index := range records {
+		records[index] = api.Record{
+			Topic: topic, Partition: partition, Offset: uint64(index), Value: payload,
 		}
-		batch := api.RecordBatch{Topic: topic, Partition: 0, BaseOffset: base, Records: []api.Record{{Topic: topic, Partition: 0, Offset: base, Value: []byte("benchmark")}}}
-		if _, err := partition.AppendBatch(batch); err != nil {
-			b.Fatal(err)
-		}
+	}
+	return records
+}
+
+func benchmarkCheckDurableEnd(b *testing.B, partition *storage.Partition, expected uint64) {
+	b.Helper()
+	stats := partition.Stats()
+	if stats.DurableEnd != expected {
+		b.Fatalf("durable end = %d, want %d", stats.DurableEnd, expected)
+	}
+	if stats.AppendUnknown != 0 || stats.AppendKnownUnwritten != 0 {
+		b.Fatalf("append outcomes include unknown=%d known_unwritten=%d", stats.AppendUnknown, stats.AppendKnownUnwritten)
+	}
+	if expected != 0 {
+		b.ReportMetric(float64(stats.WriteLatency.Operations)/float64(expected), "writes/record")
+		b.ReportMetric(float64(stats.SyncLatency.Operations)/float64(expected), "syncs/record")
+	}
+}
+
+func benchmarkReportThroughput(b *testing.B, records uint64) {
+	b.Helper()
+	elapsed := b.Elapsed().Seconds()
+	if elapsed > 0 {
+		b.ReportMetric(float64(records)/elapsed, "records/s")
 	}
 }
 

@@ -77,6 +77,10 @@ func (p *Partition) appendEncodedLocked(batch api.RecordBatch, encoded []byte) (
 			p.unavailable = true
 			return 0, nil, errors.Join(api.ErrPartitionUnavailable, err)
 		}
+		// The prior segment is immutable after the new segment is published.
+		// Its derived indexes are safe to checkpoint without affecting the
+		// authoritative append below.
+		_ = installSegmentIndexes(active, p.storeID, p.options.IndexStride)
 		p.segments = append(p.segments, rolled)
 		active = rolled
 	}

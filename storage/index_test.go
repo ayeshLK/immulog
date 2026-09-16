@@ -52,6 +52,25 @@ func TestSparseIndexesHaveIndependentEnvelopesAndRegressingTimeHints(t *testing.
 	}
 
 	segment := partition.segments[0]
+	for _, time := range []bool{false, true} {
+		if _, err := os.Stat(indexPath(segment.path, time)); !os.IsNotExist(err) {
+			t.Fatalf("index sidecar exists before close (time=%t): %v", time, err)
+		}
+	}
+	got, err := partition.Read(2, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []api.Record{
+		{Topic: topic, Partition: 0, Offset: 2, Timestamp: -5, Value: []byte("c"), Headers: []api.Header{}},
+		{Topic: topic, Partition: 0, Offset: 3, Timestamp: -30, Value: []byte("d"), Headers: []api.Header{}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("indexed read = %#v, want %#v", got, want)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 	offsetData, err := os.ReadFile(indexPath(segment.path, false))
 	if err != nil {
 		t.Fatal(err)
@@ -90,19 +109,61 @@ func TestSparseIndexesHaveIndependentEnvelopesAndRegressingTimeHints(t *testing.
 		previous = entry.prefixMax
 	}
 
-	got, err := partition.Read(2, 10)
+}
+
+func TestIndexesPublishWhenSegmentBecomesInactive(t *testing.T) {
+	dir := t.TempDir()
+	topic := testTopic()
+	first := indexedBatch(topic, 0, 0, 1, "value")
+	encoded, err := EncodeBatch(first)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []api.Record{
-		{Topic: topic, Partition: 0, Offset: 2, Timestamp: -5, Value: []byte("c"), Headers: []api.Header{}},
-		{Topic: topic, Partition: 0, Offset: 3, Timestamp: -30, Value: []byte("d"), Headers: []api.Header{}},
+	options := PartitionOptions{
+		SegmentBytes: uint64(SegmentHeaderBytes) + uint64(len(encoded)) + 1,
+		BatchBytes:   4096,
+		BatchRecords: 1,
+		RecordBytes:  1024,
+		IndexStride:  1,
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("indexed read = %#v, want %#v", got, want)
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partition, err := store.OpenPartition(topic, 0, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := partition.AppendBatch(first); err != nil {
+		t.Fatal(err)
+	}
+	priorPath := partition.segments[0].path
+	for _, time := range []bool{false, true} {
+		if _, err := os.Stat(indexPath(priorPath, time)); !os.IsNotExist(err) {
+			t.Fatalf("index sidecar exists before roll (time=%t): %v", time, err)
+		}
+	}
+	if _, err := partition.AppendBatch(indexedBatch(topic, 0, 1, 2, "value")); err != nil {
+		t.Fatal(err)
+	}
+	if len(partition.segments) != 2 {
+		t.Fatalf("segment count = %d, want 2", len(partition.segments))
+	}
+	for _, time := range []bool{false, true} {
+		if _, err := os.Stat(indexPath(priorPath, time)); err != nil {
+			t.Fatalf("closed segment index (time=%t) = %v", time, err)
+		}
+		if _, err := os.Stat(indexPath(partition.segments[1].path, time)); !os.IsNotExist(err) {
+			t.Fatalf("active segment index exists before close (time=%t): %v", time, err)
+		}
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
+	}
+	for _, time := range []bool{false, true} {
+		if _, err := os.Stat(indexPath(partition.segments[1].path, time)); err != nil {
+			t.Fatalf("active segment index after close (time=%t) = %v", time, err)
+		}
 	}
 }
 
@@ -150,6 +211,13 @@ func TestLaggingOrCorruptIndexesNeverHideLogRecords(t *testing.T) {
 	}
 	if len(got) != 3 || string(got[2].Value) != "three" {
 		t.Fatalf("lagging-index read = %#v, want all three records", got)
+	}
+	unchanged, err := os.ReadFile(indexPathname)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(unchanged, lagging) {
+		t.Fatal("startup rewrote a valid lagging index")
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -203,6 +271,15 @@ func TestIndexHeaderOnlyCacheIsValidForEmptySegment(t *testing.T) {
 	}
 	for _, time := range []bool{false, true} {
 		path := indexPath(partition.segments[0].path, time)
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("index sidecar exists before close (time=%t): %v", time, err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, time := range []bool{false, true} {
+		path := indexPath(partition.segments[0].path, time)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -210,8 +287,5 @@ func TestIndexHeaderOnlyCacheIsValidForEmptySegment(t *testing.T) {
 		if len(data) != int(IndexHeaderBytes) {
 			t.Fatalf("empty index %q has %d bytes, want header-only", filepath.Base(path), len(data))
 		}
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
 	}
 }
