@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ayeshLK/immulog/api"
 	"github.com/ayeshLK/immulog/storage"
@@ -40,7 +41,7 @@ func BenchmarkIngressAppend(b *testing.B) {
 // BenchmarkIngressAppendParallel measures the bounded ingress path with an
 // explicit producer count and enough batch capacity for coalescing.
 func BenchmarkIngressAppendParallel(b *testing.B) {
-	for _, producers := range []int{1, 2, 4, 8} {
+	for _, producers := range []int{1, 2, 4, 8, 16, 32, 64} {
 		for _, payloadSize := range []int{64, 256, 1024, 4096} {
 			b.Run(fmt.Sprintf("producers-%d/payload-%d", producers, payloadSize), func(b *testing.B) {
 				payload := benchmarkPayload(payloadSize)
@@ -70,6 +71,36 @@ func BenchmarkIngressAppendParallel(b *testing.B) {
 
 // BenchmarkDirectAppendBatch measures synchronous durable batches without
 // adding an EndOffset call to each timed iteration.
+func BenchmarkIngressBatchLinger(b *testing.B) {
+	for _, producers := range []int{8, 32, 64} {
+		for _, linger := range []time.Duration{0, 100 * time.Microsecond, time.Millisecond, 5 * time.Millisecond} {
+			b.Run(fmt.Sprintf("producers-%d/linger-%s", producers, linger), func(b *testing.B) {
+				payload := benchmarkPayload(1024)
+				partition, topic, store := benchmarkPartition(b, storage.PartitionOptions{
+					BatchBytes:       benchmarkBatchBytes,
+					BatchRecords:     256,
+					SegmentBytes:     benchmarkSegmentBytes,
+					InFlightBytes:    32 << 20,
+					InFlightRecords:  4096,
+					AdmissionWaiters: 256,
+					BatchLinger:      linger,
+				})
+				defer store.Close()
+				b.SetBytes(int64(len(payload)))
+				b.ReportAllocs()
+				b.ResetTimer()
+				err := runConcurrentAppends(b, partition, topic, payload, producers)
+				b.StopTimer()
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkCheckDurableEnd(b, partition, uint64(b.N))
+				benchmarkReportThroughput(b, uint64(b.N))
+			})
+		}
+	}
+}
+
 func BenchmarkDirectAppendBatch(b *testing.B) {
 	for _, batchRecords := range []uint32{1, 8, 64, 256} {
 		for _, payloadSize := range []int{256, 1024, 4096} {
