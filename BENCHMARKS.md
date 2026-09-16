@@ -150,6 +150,45 @@ single run is informational; it does not establish a regression threshold or
 prove a general advantage over the direct reference path. No pre-migration
 historical baseline was captured with the same command and host conditions.
 
+### Timed ingress acquisition comparison — 2026-09-16
+
+Measured on merged `main` commit `1e480154b21cd5090cdeed292bcd8b89819d85e5`
+against pre-migration commit `7ed288d`, on Linux `7.0.0-31-generic` x86_64 with
+Go `1.26.2`, an Intel Core i7-10510U, 8 logical CPUs, and an ext4 filesystem
+mounted from `/dev/mapper/ubuntu--vg-ubuntu--lv`. The benchmark used the same
+host, filesystem, limits, payload, and command for both revisions:
+
+```sh
+go test ./perf/benchmarks -run '^$' -bench '^BenchmarkIngressBatchLinger$' \
+  -benchmem -benchtime=2s -count=3
+```
+
+Values below are medians across the three samples. The pre-migration revision
+used the v0.4.0 post-selection sleep; merged `main` uses v0.6.0
+`WithBatchTimeout`.
+
+| Producers | Linger | Before records/s | After records/s | Change | Before syncs/record | After syncs/record |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 0s | 2,667 | 2,667 | +0.0% | 0.2500 | 0.2498 |
+| 8 | 100µs | 1,501 | 2,936 | +95.6% | 0.2500 | 0.1256 |
+| 8 | 1ms | 1,485 | 2,890 | +94.6% | 0.2501 | 0.1251 |
+| 8 | 5ms | 547 | 1,093 | +99.7% | 0.2508 | 0.1252 |
+| 32 | 0s | 9,647 | 9,556 | -0.9% | 0.06235 | 0.06227 |
+| 32 | 100µs | 5,775 | 11,075 | +91.8% | 0.06240 | 0.03196 |
+| 32 | 1ms | 5,589 | 10,503 | +87.9% | 0.06243 | 0.03127 |
+| 32 | 5ms | 2,161 | 4,182 | +93.5% | 0.06257 | 0.03126 |
+| 64 | 0s | 17,347 | 17,528 | +1.0% | 0.03015 | 0.03035 |
+| 64 | 100µs | 11,316 | 19,211 | +69.8% | 0.03060 | 0.01662 |
+| 64 | 1ms | 10,814 | 18,354 | +69.7% | 0.03036 | 0.01564 |
+| 64 | 5ms | 4,251 | 7,988 | +87.9% | 0.03093 | 0.01567 |
+
+Zero-linger performance is effectively unchanged, while positive windows
+roughly halve syncs per record and improve throughput by 70–96% in the useful
+100µs–1ms range. The 5ms window still improves on the old implementation but
+has lower absolute throughput than shorter windows because it adds avoidable
+latency. This is a comparative local smoke, not a release threshold; it does
+not claim multi-batch group-commit fsync reduction.
+
 ### Mixed workload smoke — 2026-09-14
 
 Both runs used seed `0x5eed5eed`, two producers per partition, two partitions
