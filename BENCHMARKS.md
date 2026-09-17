@@ -41,7 +41,9 @@ runtime and storage diagnostics.
 
 The soak's `acknowledged`, `unknown`, and `known_rejected` counters partition
 the offered append attempts. `cancelled` and `overload_calls` are additional
-observations and may overlap those outcome counters.
+observations and may overlap those outcome counters. The soak also samples
+consumer delivery/commit lag, process RSS/I/O/CPU ticks, and append-to-scan and
+append-to-consumer timing for acknowledged records.
 
 ## Reproduce locally
 
@@ -59,14 +61,19 @@ go test ./perf/benchmarks -run '^$' -bench 'BenchmarkIngressAppendParallel|Bench
 ```
 
 Every benchmark must validate the final durable end and report its workload
-parameters. Use `b.SetBytes` for payload bandwidth and report records/sec for
-record throughput. Treat setup, reopen, retention, and verification as separate
-lifecycle measurements rather than including them in steady-state throughput.
+parameters. Append cases report explicit `producer-records/s` and
+`producer-bytes/s`; fetch cases report `consumer-records/s` and
+`consumer-bytes/s`. Use `b.SetBytes` for the standard Go bandwidth metric and
+report records/sec for record throughput. Treat setup, reopen, retention, and
+verification as separate lifecycle measurements rather than including them in
+steady-state throughput.
 
 The manual GitHub Actions workflow in
 `.github/workflows/performance.yml` accepts `benchtime` and `benchmark_count`
 inputs, records the Go and host environment, and uploads the raw output as an
-artifact. Its default is five one-second samples.
+artifact. It can optionally run the fixed-seed mixed-workload smoke and upload
+its log, checkpoint, environment, and `metrics.json` sidecar. Its default is
+five one-second microbenchmark samples with the soak smoke disabled.
 
 Run a short, fixed-seed workload smoke with verbose metrics:
 
@@ -79,17 +86,34 @@ perf/soak/run.sh \
   --minimum-open-files 0
 ```
 
+For a local durable-throughput smoke without deliberate overload injection:
+
+```sh
+perf/soak/run.sh \
+  --profile sustained \
+  --duration 20s \
+  --timeout 90s \
+  --minimum-free-bytes 0 \
+  --minimum-open-files 0
+```
+
 The configurable `perf/soak/run.sh` runner captures the tested commit and
 host environment, writes the test log and checkpoint under a dedicated run
 directory, and preserves the Go test exit status. Its defaults are a four-hour
 duration, the fixed seed above, a 10-minute reopen interval, a 20ms append
 interval, and duration-aware automatic resource estimates. The estimate uses
 1.5 MiB/s of growth plus a 2 GiB reserve and 2.5 log segments/second with
-headroom; for four hours this is approximately 24 GiB and 65,536 files. Use
+headroom; for four hours this is approximately 24 GiB and 65,536 files. The
+`mixed` profile retains the cancellation/overload stress behavior used by the
+correctness soak. The `sustained` profile disables deliberate short-deadline
+and overload injection so acknowledged throughput and lag can be evaluated as
+a local durable-throughput workload. Use
 `perf/soak/run.sh --help` to view all duration, seed, interval, resource,
 timeout, and path options. Numeric resource values override the estimates and
 zero disables a preflight. The runner records initial/final data size, free
-space, and the process open-file limit.
+space, and the process open-file limit, and writes a machine-readable
+`metrics.json` sidecar containing counters, resource observations, lag, oracle
+results, and latency bucket data.
 
 ### Open-file limits for long runs
 
@@ -166,6 +190,12 @@ Every result entry should record:
 - benchmark duration and sample count;
 - payload sizes, batching, topic/partition counts, and operating limits; and
 - soak duration, seed, reopen interval, retention policy, and diagnostics.
+
+Soak latency p50/p95/p99 values are upper bounds of the configured duration
+buckets, not exact order statistics. Bounded microbenchmarks may report exact
+percentiles when they retain per-operation samples. Process CPU values are
+Linux clock ticks and process I/O values are cumulative `/proc` counters; they
+are not whole-device utilization measurements.
 
 A minimal environment capture is:
 

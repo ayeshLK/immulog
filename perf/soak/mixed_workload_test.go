@@ -71,55 +71,89 @@ type soakFixture struct {
 }
 
 type soakExpected struct {
-	value          []byte
-	acked          bool
-	observed       bool
-	observedOffset uint64
-	offset         uint64
+	value                   []byte
+	offeredAt               time.Time
+	acknowledgedAt          time.Time
+	observedAt              time.Time
+	deliveredAt             time.Time
+	acked                   bool
+	observed                bool
+	observedOffset          uint64
+	deliveryLatencyRecorded bool
+	offset                  uint64
+}
+
+type soakTiming struct {
+	offeredAt      time.Time
+	acknowledgedAt time.Time
 }
 
 type soakOracle struct {
-	mu            sync.Mutex
-	topic         api.TopicID
-	partition     uint32
-	seed          uint64
-	run           uint64
-	next          uint64
-	lastL         uint64
-	lastH         uint64
-	pending       map[string]*soakExpected
-	lastSequences map[uint32]uint64
-	digest        hash.Hash
-	verified      uint64
-	expired       uint64
-	committed     uint64
-	err           error
+	mu             sync.Mutex
+	topic          api.TopicID
+	partition      uint32
+	seed           uint64
+	run            uint64
+	next           uint64
+	lastL          uint64
+	lastH          uint64
+	pending        map[string]*soakExpected
+	lastSequences  map[uint32]uint64
+	deliveryTiming map[uint64]soakTiming
+	digest         hash.Hash
+	metrics        *soakMetrics
+	verified       uint64
+	expired        uint64
+	committed      uint64
+	err            error
 }
 
 type soakMetrics struct {
-	offered           atomic.Uint64
-	acknowledged      atomic.Uint64
-	unknown           atomic.Uint64
-	knownRejected     atomic.Uint64
-	cancelled         atomic.Uint64
-	overloadCalls     atomic.Uint64
-	acknowledgedBytes atomic.Uint64
-	maxGoroutines     atomic.Uint64
-	maxOpenFiles      atomic.Uint64
-	maxHeapBytes      atomic.Uint64
-	gcCycles          atomic.Uint64
-	appendOps         atomic.Uint64
-	appendNanos       atomic.Uint64
-	appendBuckets     [soakLatencyBucketCount]atomic.Uint64
-	pollOps           atomic.Uint64
-	pollNanos         atomic.Uint64
-	pollBuckets       [soakLatencyBucketCount]atomic.Uint64
-	commitOps         atomic.Uint64
-	commitNanos       atomic.Uint64
-	commitBuckets     [soakLatencyBucketCount]atomic.Uint64
-	verifyOps         atomic.Uint64
-	verifyNanos       atomic.Uint64
-	verifyBuckets     [soakLatencyBucketCount]atomic.Uint64
+	offered                atomic.Uint64
+	acknowledged           atomic.Uint64
+	unknown                atomic.Uint64
+	knownRejected          atomic.Uint64
+	cancelled              atomic.Uint64
+	overloadCalls          atomic.Uint64
+	acknowledgedBytes      atomic.Uint64
+	maxGoroutines          atomic.Uint64
+	maxOpenFiles           atomic.Uint64
+	maxHeapBytes           atomic.Uint64
+	maxRSSBytes            atomic.Uint64
+	gcCycles               atomic.Uint64
+	processReadBytes       atomic.Uint64
+	processWriteBytes      atomic.Uint64
+	processUserTicks       atomic.Uint64
+	processSystemTicks     atomic.Uint64
+	lagSamples             atomic.Uint64
+	deliveryLagTotal       atomic.Uint64
+	commitLagTotal         atomic.Uint64
+	maxDeliveryLag         atomic.Uint64
+	maxCommitLag           atomic.Uint64
+	appendOps              atomic.Uint64
+	appendNanos            atomic.Uint64
+	appendBuckets          [soakLatencyBucketCount]atomic.Uint64
+	pollOps                atomic.Uint64
+	pollNanos              atomic.Uint64
+	pollBuckets            [soakLatencyBucketCount]atomic.Uint64
+	commitOps              atomic.Uint64
+	commitNanos            atomic.Uint64
+	commitBuckets          [soakLatencyBucketCount]atomic.Uint64
+	verifyOps              atomic.Uint64
+	verifyNanos            atomic.Uint64
+	verifyBuckets          [soakLatencyBucketCount]atomic.Uint64
+	offerToScanOps         atomic.Uint64
+	offerToScanNanos       atomic.Uint64
+	offerToScanBuckets     [soakLatencyBucketCount]atomic.Uint64
+	ackToScanOps           atomic.Uint64
+	ackToScanNanos         atomic.Uint64
+	ackToScanBuckets       [soakLatencyBucketCount]atomic.Uint64
+	offerToDeliveryOps     atomic.Uint64
+	offerToDeliveryNanos   atomic.Uint64
+	offerToDeliveryBuckets [soakLatencyBucketCount]atomic.Uint64
+	ackToDeliveryOps       atomic.Uint64
+	ackToDeliveryNanos     atomic.Uint64
+	ackToDeliveryBuckets   [soakLatencyBucketCount]atomic.Uint64
 }
 
 type soakGroupHandle struct {
@@ -136,6 +170,10 @@ func TestMixedWorkloadSoak(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	profile, err := soakProfile()
+	if err != nil {
+		t.Fatal(err)
+	}
 	reopenInterval, err := soakReopenInterval(duration)
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +183,13 @@ func TestMixedWorkloadSoak(t *testing.T) {
 		t.Fatal(err)
 	}
 	overloadPeriod, overloadWindow := time.Minute, 5*time.Second
-	if duration <= 30*time.Second {
+	stressCancellation := true
+	if profile == "sustained" {
+		overloadPeriod, overloadWindow = duration+time.Minute, 0
+		appendInterval = 0
+		stressCancellation = false
+	}
+	if duration <= 30*time.Second && profile == "mixed" {
 		overloadPeriod, overloadWindow = 5*time.Second, time.Second
 	}
 	dir, cleanup := soakDirectory(t)
@@ -181,6 +225,9 @@ func TestMixedWorkloadSoak(t *testing.T) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
+	for _, oracle := range oracles {
+		oracle.metrics = metrics
+	}
 	if err := writeSoakCheckpoint(dir, checkpoint); err != nil {
 		_ = store.Close()
 		t.Fatal(err)
@@ -190,7 +237,7 @@ func TestMixedWorkloadSoak(t *testing.T) {
 	soakContext, cancel := context.WithTimeout(context.Background(), duration)
 	defer cancel()
 	for {
-		if err := runSoakCycle(soakContext, store, fixture, oracles, metrics, checkpoint.Run, seed, &sequenceCounter, appendInterval, reopenInterval, overloadPeriod, overloadWindow); err != nil {
+		if err := runSoakCycle(soakContext, store, fixture, oracles, metrics, checkpoint.Run, seed, &sequenceCounter, appendInterval, reopenInterval, overloadPeriod, overloadWindow, stressCancellation); err != nil {
 			t.Fatal(err)
 		}
 		for key, oracle := range oracles {
@@ -221,10 +268,157 @@ func TestMixedWorkloadSoak(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("mixed soak completed duration=%s run=%d seed=0x%x %s", duration, checkpoint.Run, seed, metrics.summary())
+	t.Logf("mixed soak completed profile=%s duration=%s run=%d seed=0x%x %s", profile, duration, checkpoint.Run, seed, metrics.summary())
 	for key, oracle := range oracles {
 		t.Logf("oracle %s verified=%d expired=%d next=%d digest=%s", key, oracle.verifiedCount(), oracle.expiredCount(), oracle.nextOffset(), oracle.digestHex())
 	}
+	if path := os.Getenv("IMMULOG_SOAK_METRICS_FILE"); path != "" {
+		if err := writeSoakMetrics(path, metrics, oracles); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type soakLatencyReport struct {
+	Operations     uint64   `json:"operations"`
+	TotalNanos     uint64   `json:"total_nanos"`
+	AverageNanos   uint64   `json:"average_nanos"`
+	P50BucketNanos uint64   `json:"p50_bucket_nanos"`
+	P95BucketNanos uint64   `json:"p95_bucket_nanos"`
+	P99BucketNanos uint64   `json:"p99_bucket_nanos"`
+	Buckets        []uint64 `json:"buckets"`
+}
+
+type soakOracleReport struct {
+	Verified uint64 `json:"verified"`
+	Expired  uint64 `json:"expired"`
+	Next     uint64 `json:"next"`
+	Digest   string `json:"digest"`
+}
+
+type soakMetricsReport struct {
+	Version            uint32                       `json:"version"`
+	Profile            string                       `json:"profile"`
+	Offered            uint64                       `json:"offered"`
+	Acknowledged       uint64                       `json:"acknowledged"`
+	Unknown            uint64                       `json:"unknown"`
+	KnownRejected      uint64                       `json:"known_rejected"`
+	Cancelled          uint64                       `json:"cancelled"`
+	OverloadCalls      uint64                       `json:"overload_calls"`
+	AcknowledgedBytes  uint64                       `json:"acknowledged_bytes"`
+	MaxGoroutines      uint64                       `json:"max_goroutines"`
+	MaxOpenFiles       uint64                       `json:"max_open_files"`
+	MaxHeapBytes       uint64                       `json:"max_heap_bytes"`
+	MaxRSSBytes        uint64                       `json:"max_rss_bytes"`
+	GCycles            uint64                       `json:"gc_cycles"`
+	ProcessReadBytes   uint64                       `json:"process_read_bytes"`
+	ProcessWriteBytes  uint64                       `json:"process_write_bytes"`
+	ProcessUserTicks   uint64                       `json:"process_user_ticks"`
+	ProcessSystemTicks uint64                       `json:"process_system_ticks"`
+	LagSamples         uint64                       `json:"lag_samples"`
+	AverageDeliveryLag uint64                       `json:"average_delivery_lag"`
+	MaxDeliveryLag     uint64                       `json:"max_delivery_lag"`
+	AverageCommitLag   uint64                       `json:"average_commit_lag"`
+	MaxCommitLag       uint64                       `json:"max_commit_lag"`
+	Latency            map[string]soakLatencyReport `json:"latency"`
+	Oracles            map[string]soakOracleReport  `json:"oracles"`
+}
+
+func writeSoakMetrics(path string, metrics *soakMetrics, oracles map[string]*soakOracle) error {
+	lagSamples := metrics.lagSamples.Load()
+	averageDeliveryLag, averageCommitLag := uint64(0), uint64(0)
+	if lagSamples != 0 {
+		averageDeliveryLag = metrics.deliveryLagTotal.Load() / lagSamples
+		averageCommitLag = metrics.commitLagTotal.Load() / lagSamples
+	}
+	report := soakMetricsReport{
+		Version:            1,
+		Profile:            os.Getenv("IMMULOG_SOAK_PROFILE"),
+		Offered:            metrics.offered.Load(),
+		Acknowledged:       metrics.acknowledged.Load(),
+		Unknown:            metrics.unknown.Load(),
+		KnownRejected:      metrics.knownRejected.Load(),
+		Cancelled:          metrics.cancelled.Load(),
+		OverloadCalls:      metrics.overloadCalls.Load(),
+		AcknowledgedBytes:  metrics.acknowledgedBytes.Load(),
+		MaxGoroutines:      metrics.maxGoroutines.Load(),
+		MaxOpenFiles:       metrics.maxOpenFiles.Load(),
+		MaxHeapBytes:       metrics.maxHeapBytes.Load(),
+		MaxRSSBytes:        metrics.maxRSSBytes.Load(),
+		GCycles:            metrics.gcCycles.Load(),
+		ProcessReadBytes:   metrics.processReadBytes.Load(),
+		ProcessWriteBytes:  metrics.processWriteBytes.Load(),
+		ProcessUserTicks:   metrics.processUserTicks.Load(),
+		ProcessSystemTicks: metrics.processSystemTicks.Load(),
+		LagSamples:         lagSamples,
+		AverageDeliveryLag: averageDeliveryLag,
+		MaxDeliveryLag:     metrics.maxDeliveryLag.Load(),
+		AverageCommitLag:   averageCommitLag,
+		MaxCommitLag:       metrics.maxCommitLag.Load(),
+		Latency:            make(map[string]soakLatencyReport),
+		Oracles:            make(map[string]soakOracleReport, len(oracles)),
+	}
+	latencies := []struct {
+		name       string
+		operations *atomic.Uint64
+		nanos      *atomic.Uint64
+		buckets    *[soakLatencyBucketCount]atomic.Uint64
+	}{
+		{"append", &metrics.appendOps, &metrics.appendNanos, &metrics.appendBuckets},
+		{"poll", &metrics.pollOps, &metrics.pollNanos, &metrics.pollBuckets},
+		{"commit", &metrics.commitOps, &metrics.commitNanos, &metrics.commitBuckets},
+		{"verify", &metrics.verifyOps, &metrics.verifyNanos, &metrics.verifyBuckets},
+		{"offer_to_scan", &metrics.offerToScanOps, &metrics.offerToScanNanos, &metrics.offerToScanBuckets},
+		{"ack_to_scan", &metrics.ackToScanOps, &metrics.ackToScanNanos, &metrics.ackToScanBuckets},
+		{"offer_to_delivery", &metrics.offerToDeliveryOps, &metrics.offerToDeliveryNanos, &metrics.offerToDeliveryBuckets},
+		{"ack_to_delivery", &metrics.ackToDeliveryOps, &metrics.ackToDeliveryNanos, &metrics.ackToDeliveryBuckets},
+	}
+	for _, latency := range latencies {
+		values := make([]uint64, len(latency.buckets))
+		for index := range latency.buckets {
+			values[index] = latency.buckets[index].Load()
+		}
+		latencyReport := soakLatencyReport{
+			Operations:     latency.operations.Load(),
+			TotalNanos:     latency.nanos.Load(),
+			AverageNanos:   averageLatencyNanos(latency.operations.Load(), latency.nanos.Load()),
+			P50BucketNanos: latencyBucketQuantile(values, 0.50),
+			P95BucketNanos: latencyBucketQuantile(values, 0.95),
+			P99BucketNanos: latencyBucketQuantile(values, 0.99),
+			Buckets:        values,
+		}
+		report.Latency[latency.name] = latencyReport
+	}
+	for key, oracle := range oracles {
+		report.Oracles[key] = soakOracleReport{
+			Verified: oracle.verifiedCount(),
+			Expired:  oracle.expiredCount(),
+			Next:     oracle.nextOffset(),
+			Digest:   oracle.digestHex(),
+		}
+	}
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode soak metrics: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create soak metrics directory: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write soak metrics: %w", err)
+	}
+	return nil
+}
+
+func soakProfile() (string, error) {
+	profile := os.Getenv("IMMULOG_SOAK_PROFILE")
+	if profile == "" {
+		return "mixed", nil
+	}
+	if profile != "mixed" && profile != "sustained" {
+		return "", fmt.Errorf("IMMULOG_SOAK_PROFILE must be mixed or sustained, got %q", profile)
+	}
+	return profile, nil
 }
 
 func soakDuration() (time.Duration, error) {
@@ -427,14 +621,14 @@ func newSoakOracles(fixture soakFixture, checkpoint soakCheckpoint, seed, run ui
 			oracles[key] = &soakOracle{
 				topic: topic.id, partition: partition, seed: seed, run: run, next: next,
 				lastL: stats.LogStartOffset, lastH: stats.DurableEnd,
-				pending: make(map[string]*soakExpected), lastSequences: make(map[uint32]uint64), digest: sha256.New(),
+				pending: make(map[string]*soakExpected), lastSequences: make(map[uint32]uint64), deliveryTiming: make(map[uint64]soakTiming), digest: sha256.New(),
 			}
 		}
 	}
 	return oracles, nil
 }
 
-func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixture, oracles map[string]*soakOracle, metrics *soakMetrics, run, seed uint64, sequenceCounter *atomic.Uint64, appendInterval, reopenInterval, overloadPeriod, overloadWindow time.Duration) error {
+func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixture, oracles map[string]*soakOracle, metrics *soakMetrics, run, seed uint64, sequenceCounter *atomic.Uint64, appendInterval, reopenInterval, overloadPeriod, overloadWindow time.Duration, stressCancellation bool) error {
 	members := soakGroupMembers(fixture.stable.ID, false)
 	consumer, err := store.OpenConsumerGroup(parent, "soak-workers", members, soakGroupOptions())
 	if err != nil {
@@ -460,12 +654,12 @@ func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixt
 			workerWait.Add(1)
 			go func(partition, producer uint32) {
 				defer workerWait.Done()
-				producerLoop(cycleContext, cycleStart, fixture.retainedParts[partition], seed, run, partition*soakProducerCount+producer, sequenceCounter, appendInterval, overloadPeriod, overloadWindow, metrics, oracles[soakPartitionKey(soakRetainedTopic, partition)], report)
+				producerLoop(cycleContext, cycleStart, fixture.retainedParts[partition], seed, run, partition*soakProducerCount+producer, sequenceCounter, appendInterval, overloadPeriod, overloadWindow, stressCancellation, metrics, oracles[soakPartitionKey(soakRetainedTopic, partition)], report)
 			}(partition, producer)
 			workerWait.Add(1)
 			go func(partition, producer uint32) {
 				defer workerWait.Done()
-				producerLoop(cycleContext, cycleStart, fixture.stableParts[partition], seed, run, 100+partition*soakProducerCount+producer, sequenceCounter, appendInterval, overloadPeriod, overloadWindow, metrics, oracles[soakPartitionKey(soakStableTopic, partition)], report)
+				producerLoop(cycleContext, cycleStart, fixture.stableParts[partition], seed, run, 100+partition*soakProducerCount+producer, sequenceCounter, appendInterval, overloadPeriod, overloadWindow, stressCancellation, metrics, oracles[soakPartitionKey(soakStableTopic, partition)], report)
 			}(partition, producer)
 		}
 	}
@@ -503,7 +697,7 @@ func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixt
 	workerWait.Add(1)
 	go func() {
 		defer workerWait.Done()
-		statsLoop(cycleContext, store, metrics, report)
+		statsLoop(cycleContext, store, handle, fixture.stable.ID, metrics, report)
 	}()
 
 	timer := time.NewTimer(reopenInterval)
@@ -551,7 +745,7 @@ func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixt
 	return firstErr
 }
 
-func producerLoop(ctx context.Context, started time.Time, partition *storage.Partition, seed, run uint64, producer uint32, sequenceCounter *atomic.Uint64, appendInterval, overloadPeriod, overloadWindow time.Duration, metrics *soakMetrics, oracle *soakOracle, report func(error)) {
+func producerLoop(ctx context.Context, started time.Time, partition *storage.Partition, seed, run uint64, producer uint32, sequenceCounter *atomic.Uint64, appendInterval, overloadPeriod, overloadWindow time.Duration, stressCancellation bool, metrics *soakMetrics, oracle *soakOracle, report func(error)) {
 	random := rand.New(rand.NewSource(int64(seed + uint64(producer))))
 	for {
 		if ctx.Err() != nil {
@@ -570,7 +764,7 @@ func producerLoop(ctx context.Context, started time.Time, partition *storage.Par
 		overload := elapsed >= overloadPeriod-overloadWindow
 		callContext := ctx
 		var cancel context.CancelFunc
-		if overload || sequence%19 == 0 {
+		if stressCancellation && (overload || sequence%19 == 0) {
 			callContext, cancel = context.WithTimeout(ctx, 250*time.Microsecond)
 		}
 		callStarted := time.Now()
@@ -749,7 +943,7 @@ func validateSoakDelivery(result api.FetchResult, topic api.TopicID, partition u
 		if record.Offset != want || record.Topic != topic || record.Partition != partition {
 			return fmt.Errorf("group delivery has a noncontiguous record at partition %d", partition)
 		}
-		if err := oracle.delivery(record.Offset); err != nil {
+		if err := oracle.delivery(record.Key, record.Offset); err != nil {
 			return err
 		}
 	}
@@ -760,7 +954,7 @@ func validateSoakDelivery(result api.FetchResult, topic api.TopicID, partition u
 }
 
 func isExpectedSoakConsumerError(err error) bool {
-	return errors.Is(err, api.ErrAssignmentLost) || errors.Is(err, api.ErrClosing) || errors.Is(err, api.ErrClosed) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+	return errors.Is(err, api.ErrAssignmentLost) || errors.Is(err, api.ErrConcurrentOperation) || errors.Is(err, api.ErrClosing) || errors.Is(err, api.ErrClosed) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func churnLoop(ctx context.Context, store *storage.Store, handle *soakGroupHandle, topic api.TopicID, report func(error)) {
@@ -826,7 +1020,7 @@ func maintenanceLoop(ctx context.Context, store *storage.Store, report func(erro
 	}
 }
 
-func statsLoop(ctx context.Context, store *storage.Store, metrics *soakMetrics, report func(error)) {
+func statsLoop(ctx context.Context, store *storage.Store, handle *soakGroupHandle, topic api.TopicID, metrics *soakMetrics, report func(error)) {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -838,6 +1032,14 @@ func statsLoop(ctx context.Context, store *storage.Store, metrics *soakMetrics, 
 				return
 			}
 			metrics.sampleRuntime()
+			if consumer := handle.currentConsumer(); consumer != nil {
+				for partition := uint32(0); partition < soakPartitionCount; partition++ {
+					consumerStats, statsErr := consumer.Stats(topic, partition)
+					if statsErr == nil && consumerStats.Active {
+						metrics.recordLag(consumerStats.DeliveryLag, consumerStats.CommitLag)
+					}
+				}
+			}
 			if err == nil && stats.OffsetsHistoryRemaining == 0 {
 				report(errors.New("soak exhausted consumer-offset history capacity"))
 				return
@@ -927,7 +1129,7 @@ func (oracle *soakOracle) offer(key, value []byte) error {
 	if _, exists := oracle.pending[id]; exists {
 		return oracle.setErrorLocked(fmt.Errorf("duplicate offered soak record ID %q", id))
 	}
-	oracle.pending[id] = &soakExpected{value: append([]byte(nil), value...)}
+	oracle.pending[id] = &soakExpected{value: append([]byte(nil), value...), offeredAt: time.Now()}
 	return nil
 }
 
@@ -945,8 +1147,16 @@ func (oracle *soakOracle) acknowledge(key, value []byte, offset uint64) error {
 		return oracle.setErrorLocked(fmt.Errorf("acknowledged soak record %q changed payload", key))
 	}
 	pending.acked = true
+	pending.acknowledgedAt = time.Now()
 	pending.offset = offset
+	if pending.deliveredAt.IsZero() {
+		oracle.deliveryTiming[offset] = soakTiming{offeredAt: pending.offeredAt, acknowledgedAt: pending.acknowledgedAt}
+	} else if !pending.deliveryLatencyRecorded {
+		oracle.recordDeliveryLatencyLocked(pending.offeredAt, pending.acknowledgedAt, pending.deliveredAt)
+		pending.deliveryLatencyRecorded = true
+	}
 	if pending.observed {
+		oracle.recordScanLatencyLocked(pending.offeredAt, pending.acknowledgedAt, pending.observedAt)
 		if pending.observedOffset != offset {
 			return oracle.setErrorLocked(fmt.Errorf("soak record %q observed at offset %d and acknowledged at %d", key, pending.observedOffset, offset))
 		}
@@ -1045,8 +1255,10 @@ func (oracle *soakOracle) observe(record api.Record) error {
 			return oracle.setErrorLocked(fmt.Errorf("oracle payload mismatch at offset %d", record.Offset))
 		}
 		pending.observed = true
+		pending.observedAt = time.Now()
 		pending.observedOffset = record.Offset
 		if pending.acked {
+			oracle.recordScanLatencyLocked(pending.offeredAt, pending.acknowledgedAt, pending.observedAt)
 			if pending.offset != record.Offset {
 				return oracle.setErrorLocked(fmt.Errorf("oracle acknowledged offset %d differs from observed %d", pending.offset, record.Offset))
 			}
@@ -1087,7 +1299,7 @@ func (oracle *soakOracle) commit(next uint64) error {
 	return nil
 }
 
-func (oracle *soakOracle) delivery(offset uint64) error {
+func (oracle *soakOracle) delivery(key []byte, offset uint64) error {
 	oracle.mu.Lock()
 	defer oracle.mu.Unlock()
 	if oracle.err != nil {
@@ -1096,7 +1308,37 @@ func (oracle *soakOracle) delivery(offset uint64) error {
 	if offset < oracle.committed {
 		return oracle.setErrorLocked(fmt.Errorf("consumer redelivered committed offset %d below %d", offset, oracle.committed))
 	}
+	deliveredAt := time.Now()
+	deliveryRecorded := false
+	if timing, ok := oracle.deliveryTiming[offset]; ok {
+		oracle.recordDeliveryLatencyLocked(timing.offeredAt, timing.acknowledgedAt, deliveredAt)
+		delete(oracle.deliveryTiming, offset)
+		deliveryRecorded = true
+	}
+	if pending := oracle.pending[string(key)]; pending != nil {
+		pending.deliveredAt = deliveredAt
+		if pending.acked && !deliveryRecorded && !pending.deliveryLatencyRecorded {
+			oracle.recordDeliveryLatencyLocked(pending.offeredAt, pending.acknowledgedAt, deliveredAt)
+			pending.deliveryLatencyRecorded = true
+		}
+	}
 	return nil
+}
+
+func (oracle *soakOracle) recordScanLatencyLocked(offeredAt, acknowledgedAt, observedAt time.Time) {
+	if oracle.metrics == nil || offeredAt.IsZero() || acknowledgedAt.IsZero() || observedAt.IsZero() {
+		return
+	}
+	recordSoakLatency(&oracle.metrics.offerToScanOps, &oracle.metrics.offerToScanNanos, &oracle.metrics.offerToScanBuckets, observedAt.Sub(offeredAt))
+	recordSoakLatency(&oracle.metrics.ackToScanOps, &oracle.metrics.ackToScanNanos, &oracle.metrics.ackToScanBuckets, observedAt.Sub(acknowledgedAt))
+}
+
+func (oracle *soakOracle) recordDeliveryLatencyLocked(offeredAt, acknowledgedAt, deliveredAt time.Time) {
+	if oracle.metrics == nil || offeredAt.IsZero() || acknowledgedAt.IsZero() || deliveredAt.IsZero() {
+		return
+	}
+	recordSoakLatency(&oracle.metrics.offerToDeliveryOps, &oracle.metrics.offerToDeliveryNanos, &oracle.metrics.offerToDeliveryBuckets, deliveredAt.Sub(offeredAt))
+	recordSoakLatency(&oracle.metrics.ackToDeliveryOps, &oracle.metrics.ackToDeliveryNanos, &oracle.metrics.ackToDeliveryBuckets, deliveredAt.Sub(acknowledgedAt))
 }
 
 func (oracle *soakOracle) setErrorLocked(err error) error {
@@ -1167,6 +1409,84 @@ func (metrics *soakMetrics) sampleRuntime() {
 	runtime.ReadMemStats(&memory)
 	metrics.updateMax(&metrics.maxHeapBytes, memory.HeapAlloc)
 	metrics.updateMax(&metrics.gcCycles, uint64(memory.NumGC))
+	if rss, readBytes, writeBytes, userTicks, systemTicks, ok := processMetrics(); ok {
+		metrics.updateMax(&metrics.maxRSSBytes, rss)
+		metrics.processReadBytes.Store(readBytes)
+		metrics.processWriteBytes.Store(writeBytes)
+		metrics.processUserTicks.Store(userTicks)
+		metrics.processSystemTicks.Store(systemTicks)
+	}
+}
+
+func (metrics *soakMetrics) recordLag(delivery, commit uint64) {
+	metrics.lagSamples.Add(1)
+	metrics.deliveryLagTotal.Add(delivery)
+	metrics.commitLagTotal.Add(commit)
+	metrics.updateMax(&metrics.maxDeliveryLag, delivery)
+	metrics.updateMax(&metrics.maxCommitLag, commit)
+}
+
+func processMetrics() (rss, readBytes, writeBytes, userTicks, systemTicks uint64, ok bool) {
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return 0, 0, 0, 0, 0, false
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		if !strings.HasPrefix(line, "VmRSS:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 3 || fields[2] != "kB" {
+			return 0, 0, 0, 0, 0, false
+		}
+		rss, err = strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return 0, 0, 0, 0, 0, false
+		}
+		rss *= 1024
+		break
+	}
+	ioData, err := os.ReadFile("/proc/self/io")
+	if err != nil {
+		return 0, 0, 0, 0, 0, false
+	}
+	for _, line := range strings.Split(string(ioData), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		value, parseErr := strconv.ParseUint(fields[1], 10, 64)
+		if parseErr != nil {
+			return 0, 0, 0, 0, 0, false
+		}
+		switch fields[0] {
+		case "read_bytes:":
+			readBytes = value
+		case "write_bytes:":
+			writeBytes = value
+		}
+	}
+	statData, err := os.ReadFile("/proc/self/stat")
+	if err != nil {
+		return 0, 0, 0, 0, 0, false
+	}
+	closeParen := strings.LastIndex(string(statData), ")")
+	if closeParen < 0 {
+		return 0, 0, 0, 0, 0, false
+	}
+	fields := strings.Fields(string(statData)[closeParen+2:])
+	if len(fields) <= 12 {
+		return 0, 0, 0, 0, 0, false
+	}
+	userTicks, err = strconv.ParseUint(fields[11], 10, 64)
+	if err != nil {
+		return 0, 0, 0, 0, 0, false
+	}
+	systemTicks, err = strconv.ParseUint(fields[12], 10, 64)
+	if err != nil {
+		return 0, 0, 0, 0, 0, false
+	}
+	return rss, readBytes, writeBytes, userTicks, systemTicks, true
 }
 
 func (metrics *soakMetrics) updateMax(target *atomic.Uint64, value uint64) {
@@ -1179,7 +1499,23 @@ func (metrics *soakMetrics) updateMax(target *atomic.Uint64, value uint64) {
 }
 
 func (metrics *soakMetrics) summary() string {
-	return fmt.Sprintf("offered=%d acknowledged=%d unknown=%d known_rejected=%d cancelled=%d overload_calls=%d acknowledged_bytes=%d max_goroutines=%d max_open_files=%d max_heap_bytes=%d gc_cycles=%d %s %s %s %s", metrics.offered.Load(), metrics.acknowledged.Load(), metrics.unknown.Load(), metrics.knownRejected.Load(), metrics.cancelled.Load(), metrics.overloadCalls.Load(), metrics.acknowledgedBytes.Load(), metrics.maxGoroutines.Load(), metrics.maxOpenFiles.Load(), metrics.maxHeapBytes.Load(), metrics.gcCycles.Load(), metrics.latencySummary("append", &metrics.appendOps, &metrics.appendNanos, &metrics.appendBuckets), metrics.latencySummary("poll", &metrics.pollOps, &metrics.pollNanos, &metrics.pollBuckets), metrics.latencySummary("commit", &metrics.commitOps, &metrics.commitNanos, &metrics.commitBuckets), metrics.latencySummary("verify", &metrics.verifyOps, &metrics.verifyNanos, &metrics.verifyBuckets))
+	lagSamples := metrics.lagSamples.Load()
+	averageDeliveryLag, averageCommitLag := uint64(0), uint64(0)
+	if lagSamples != 0 {
+		averageDeliveryLag = metrics.deliveryLagTotal.Load() / lagSamples
+		averageCommitLag = metrics.commitLagTotal.Load() / lagSamples
+	}
+	latencies := []string{
+		metrics.latencySummary("append", &metrics.appendOps, &metrics.appendNanos, &metrics.appendBuckets),
+		metrics.latencySummary("poll", &metrics.pollOps, &metrics.pollNanos, &metrics.pollBuckets),
+		metrics.latencySummary("commit", &metrics.commitOps, &metrics.commitNanos, &metrics.commitBuckets),
+		metrics.latencySummary("verify", &metrics.verifyOps, &metrics.verifyNanos, &metrics.verifyBuckets),
+		metrics.latencySummary("offer_to_scan", &metrics.offerToScanOps, &metrics.offerToScanNanos, &metrics.offerToScanBuckets),
+		metrics.latencySummary("ack_to_scan", &metrics.ackToScanOps, &metrics.ackToScanNanos, &metrics.ackToScanBuckets),
+		metrics.latencySummary("offer_to_delivery", &metrics.offerToDeliveryOps, &metrics.offerToDeliveryNanos, &metrics.offerToDeliveryBuckets),
+		metrics.latencySummary("ack_to_delivery", &metrics.ackToDeliveryOps, &metrics.ackToDeliveryNanos, &metrics.ackToDeliveryBuckets),
+	}
+	return fmt.Sprintf("offered=%d acknowledged=%d unknown=%d known_rejected=%d cancelled=%d overload_calls=%d acknowledged_bytes=%d max_goroutines=%d max_open_files=%d max_heap_bytes=%d max_rss_bytes=%d gc_cycles=%d process_read_bytes=%d process_write_bytes=%d process_user_ticks=%d process_system_ticks=%d lag_samples=%d average_delivery_lag=%d max_delivery_lag=%d average_commit_lag=%d max_commit_lag=%d %s", metrics.offered.Load(), metrics.acknowledged.Load(), metrics.unknown.Load(), metrics.knownRejected.Load(), metrics.cancelled.Load(), metrics.overloadCalls.Load(), metrics.acknowledgedBytes.Load(), metrics.maxGoroutines.Load(), metrics.maxOpenFiles.Load(), metrics.maxHeapBytes.Load(), metrics.maxRSSBytes.Load(), metrics.gcCycles.Load(), metrics.processReadBytes.Load(), metrics.processWriteBytes.Load(), metrics.processUserTicks.Load(), metrics.processSystemTicks.Load(), lagSamples, averageDeliveryLag, metrics.maxDeliveryLag.Load(), averageCommitLag, metrics.maxCommitLag.Load(), strings.Join(latencies, " "))
 }
 
 func (metrics *soakMetrics) latencySummary(name string, operations, nanos *atomic.Uint64, buckets *[soakLatencyBucketCount]atomic.Uint64) string {
@@ -1187,7 +1523,40 @@ func (metrics *soakMetrics) latencySummary(name string, operations, nanos *atomi
 	for index := range buckets {
 		values[index] = buckets[index].Load()
 	}
-	return fmt.Sprintf("%s_ops=%d_%s_nanos=%d_%s_buckets=%v", name, operations.Load(), name, nanos.Load(), name, values)
+	return fmt.Sprintf("%s_ops=%d_%s_nanos=%d_%s_avg_nanos=%d_%s_p50_bucket_nanos=%d_%s_p95_bucket_nanos=%d_%s_p99_bucket_nanos=%d_%s_buckets=%v", name, operations.Load(), name, nanos.Load(), name, averageLatencyNanos(operations.Load(), nanos.Load()), name, latencyBucketQuantile(values, 0.50), name, latencyBucketQuantile(values, 0.95), name, latencyBucketQuantile(values, 0.99), name, values)
+}
+
+func averageLatencyNanos(operations, nanos uint64) uint64 {
+	if operations == 0 {
+		return 0
+	}
+	return nanos / operations
+}
+
+func latencyBucketQuantile(values []uint64, fraction float64) uint64 {
+	var total uint64
+	for _, value := range values {
+		total += value
+	}
+	if total == 0 {
+		return 0
+	}
+	target := uint64(float64(total) * fraction)
+	if target == 0 {
+		target = 1
+	}
+	boundaries := [...]uint64{1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000}
+	var cumulative uint64
+	for index, value := range values {
+		cumulative += value
+		if cumulative >= target {
+			if index < len(boundaries) {
+				return boundaries[index]
+			}
+			return 0
+		}
+	}
+	return 0
 }
 
 func recordSoakLatency(operations, nanos *atomic.Uint64, buckets *[soakLatencyBucketCount]atomic.Uint64, elapsed time.Duration) {
