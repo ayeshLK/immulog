@@ -71,11 +71,18 @@ artifact. Its default is five one-second samples.
 Run a short, fixed-seed workload smoke with verbose metrics:
 
 ```sh
-IMMULOG_SOAK=1 \
-IMMULOG_SOAK_SEED=0x5eed5eed \
-IMMULOG_SOAK_DURATION=20s \
-go test -v ./perf/soak -run '^TestMixedWorkloadSoak$' -count=1 -timeout=90s
+perf/soak/run.sh \
+  --duration 20s \
+  --timeout 90s \
+  --seed 0x5eed5eed
 ```
+
+The configurable `perf/soak/run.sh` runner captures the tested commit and
+host environment, writes the test log and checkpoint under a dedicated run
+directory, and preserves the Go test exit status. Its defaults are a four-hour
+duration, the fixed seed above, a 10-minute reopen interval, and a 20ms append
+interval. Use `perf/soak/run.sh --help` to view all duration, seed, interval,
+timeout, and path options.
 
 Run the same smoke under the race detector:
 
@@ -90,11 +97,11 @@ For release qualification, use a dedicated pre-sized directory and a planned
 24-hour duration. Do not use a real application data directory:
 
 ```sh
-IMMULOG_SOAK=1 \
-IMMULOG_SOAK_DIR=/path/to/dedicated/soak-directory \
-IMMULOG_SOAK_SEED=0x5eed5eed \
-IMMULOG_SOAK_DURATION=24h \
-go test -v ./perf/soak -run '^TestMixedWorkloadSoak$' -count=1 -timeout=25h
+perf/soak/run.sh \
+  --run-dir /path/to/dedicated/soak-run \
+  --seed 0x5eed5eed \
+  --duration 24h \
+  --timeout 25h
 ```
 
 The soak checkpoint makes clean resumable runs possible. Keep the directory
