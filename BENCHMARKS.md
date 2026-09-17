@@ -91,6 +91,43 @@ timeout, and path options. Numeric resource values override the estimates and
 zero disables a preflight. The runner records initial/final data size, free
 space, and the process open-file limit.
 
+### Open-file limits for long runs
+
+The soak keeps log-segment files open while a partition is active. A recorded
+30-minute run reached 2,737 open files, so a four-hour qualification should
+use the runner's automatic 65,536-file estimate rather than disabling the
+preflight.
+
+Check the current shell's limits:
+
+```sh
+ulimit -Sn
+ulimit -Hn
+```
+
+If the hard limit permits it, raise the soft limit for the current shell only:
+
+```sh
+ulimit -n 65536
+perf/soak/run.sh --duration 4h --timeout 4h30m
+```
+
+If both limits are 1,024, use a temporary systemd user scope; this does not
+change persistent system configuration:
+
+```sh
+systemd-run --user --scope \
+  -p LimitNOFILE=65536:65536 \
+  bash
+
+cd /path/to/immulog
+perf/soak/run.sh --duration 4h --timeout 4h30m
+```
+
+Do not use `--minimum-open-files 0` for a long qualification unless the
+resulting lower operating limit is intentional; the process can still fail
+later when segment count exceeds the OS limit.
+
 Run the same smoke under the race detector:
 
 ```sh
@@ -220,6 +257,91 @@ The normal run completed in 20.907 seconds and the race run in 21.974
 seconds. Neither run reported an oracle, test, or race failure. The workload
 intentionally exercises cancellation and overload, so the rejection and
 unknown-outcome counts are expected observations rather than failures.
+
+### Four-hour mixed workload qualification — 2026-09-17
+
+Evidence run: `/home/ayesh/immulog-soak-20260917-091511`. The run used commit
+`d9da177823a241e080273d628a20da22b1fa3e99`, branch
+`docs/benchmark-methodology`, Go `1.26.2`, Linux `7.0.0-31-generic`, an Intel
+Core i7-10510U with 8 logical CPUs, and ext4 on
+`/dev/mapper/ubuntu--vg-ubuntu--lv`.
+
+Configuration:
+
+```text
+duration=4h
+seed=0x5eed5eed
+reopen_interval=10m
+append_interval=20ms
+timeout=4h30m
+minimum_free_bytes=25769803776 (24 GiB)
+minimum_open_files=65536
+```
+
+The process ran for 4h02m35s including cycle shutdown and verification. It
+exited with status 0 and reported `PASS`. All four independent partition
+oracles passed:
+
+| Oracle class | Verified | Expired | Next offset |
+|---|---:|---:|---:|
+| Retained, two partitions | 6,174,226 | 10 | 6,211,670 |
+| Stable, two partitions | 6,358,698 | 0 | 6,358,698 |
+
+The ten retained-topic expirations are expected retention behavior. The stable
+topic had no expirations, and no oracle reported corruption, discontinuity,
+duplicate delivery, or recovery failure.
+
+Workload counters were:
+
+| Metric | Result |
+|---|---:|
+| Offered append calls | 15,405,768 |
+| Acknowledged | 3,648,354 (23.68%) |
+| Unknown outcome | 8,922,014 (57.91%) |
+| Known rejected | 2,835,400 (18.40%) |
+| Cancelled observations | 11,757,414 |
+| Overload-window calls | 11,554,619 |
+| Acknowledged bytes | 7,325,313,118 |
+
+The cancellation and overload counters are intentionally stressed by the
+harness and may overlap the outcome counters. Unknown outcomes are expected
+under the short cancellation deadlines; they remain important evidence that
+callers must reconcile ambiguous append results rather than blindly retrying.
+
+Runtime and storage observations:
+
+| Metric | Result |
+|---|---:|
+| Initial free space | 123,483,914,240 bytes |
+| Final free space | 113,081,831,424 bytes |
+| Final data size | 9,691,036,522 bytes |
+| Maximum open files | 18,295 / 65,536 |
+| Maximum goroutines | 33 |
+| Maximum heap allocation | 485,440,872 bytes |
+| GC cycles | 148,153 |
+
+The stable topic produced 18,256 log segments and approximately 9.0 GiB of
+storage. The retained topic remained bounded at two log segments. The observed
+open-file peak closely tracks the stable segment count plus process overhead,
+which is consistent with expected segment-file lifetime rather than an
+independent descriptor leak. The four-hour free-space and open-file guardrails
+had substantial remaining headroom.
+
+Latency summaries are bucketed as `<1µs`, `1–10µs`, `10–100µs`, `100µs–1ms`,
+`1–10ms`, `10–100ms`, `100ms–1s`, and `≥1s`:
+
+| Operation | Operations | Average | Distribution summary |
+|---|---:|---:|---|
+| Append | 15,405,768 | 1.42 ms | 53.5% in 100µs–1ms; 45.8% in 1–10ms |
+| Poll | 1,194,230 | 6.08 ms | 41.8% in 1–10ms; 0.20% ≥1s |
+| Commit | 1,045,164 | 3.40 ms | 98.7% in 1–10ms |
+| Verify | 4,227,821 | 1.45 ms | 43.7% in 10–100µs; 14.2% in 1–10ms |
+
+This is a successful four-hour correctness and stability qualification for the
+configured workload. It is not a 24-hour capacity result: at the observed
+segment and storage rates, substantially longer runs require larger disk and
+open-file limits. The result also does not establish power-loss, portability,
+or production-capacity guarantees.
 
 ## Interpretation and comparison policy
 
