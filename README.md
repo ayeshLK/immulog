@@ -159,6 +159,8 @@ operation or consumer handler; do not retain internal references.
   pull-request expectations, and release hygiene.
 - [Benchmark evidence](BENCHMARKS.md): reproducible performance commands,
   dated results, soak metrics, and qualification limits.
+- [Coordination design](docs/coordination.md): future transport, cluster,
+  replication, fencing, and quorum architecture.
 - [Security policy](SECURITY.md): private vulnerability reporting and the
   library's security boundary.
 - [Code of Conduct](CODE_OF_CONDUCT.md): expectations for respectful project
