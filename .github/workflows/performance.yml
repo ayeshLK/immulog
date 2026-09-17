@@ -13,6 +13,24 @@ on:
         required: true
         default: "5"
         type: string
+      run_soak_smoke:
+        description: Run the fixed-seed mixed-workload smoke
+        required: true
+        default: false
+        type: boolean
+      soak_profile:
+        description: Soak workload profile
+        required: true
+        default: mixed
+        type: choice
+        options:
+          - mixed
+          - sustained
+      soak_duration:
+        description: Optional soak smoke duration
+        required: true
+        default: 20s
+        type: string
 
 permissions:
   contents: read
@@ -53,6 +71,17 @@ jobs:
         shell: bash
         run: |
           go test ./perf/benchmarks -run '^$' -bench . -benchmem -benchtime="$BENCHTIME" -count="$BENCHMARK_COUNT" | tee perf-results/benchmarks.txt
+      - name: Run optional soak smoke
+        if: ${{ inputs.run_soak_smoke }}
+        shell: bash
+        run: |
+          perf/soak/run.sh \
+            --run-dir "$GITHUB_WORKSPACE/perf-results/soak" \
+            --profile "${{ inputs.soak_profile }}" \
+            --duration "${{ inputs.soak_duration }}" \
+            --timeout 90s \
+            --minimum-free-bytes 0 \
+            --minimum-open-files 0
       - name: Upload raw evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
