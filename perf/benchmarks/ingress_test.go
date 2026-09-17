@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/ayeshLK/immulog/api"
+	benchmarkmetrics "github.com/ayeshLK/immulog/perf/metrics"
 	"github.com/ayeshLK/immulog/storage"
 )
 
@@ -63,7 +64,7 @@ func BenchmarkIngressAppendParallel(b *testing.B) {
 					b.Fatal(err)
 				}
 				benchmarkCheckDurableEnd(b, partition, uint64(b.N))
-				benchmarkReportThroughput(b, uint64(b.N))
+				benchmarkReportThroughput(b, "producer", uint64(b.N), uint64(b.N)*uint64(payloadSize))
 			})
 		}
 	}
@@ -95,7 +96,7 @@ func BenchmarkIngressBatchLinger(b *testing.B) {
 					b.Fatal(err)
 				}
 				benchmarkCheckDurableEnd(b, partition, uint64(b.N))
-				benchmarkReportThroughput(b, uint64(b.N))
+				benchmarkReportThroughput(b, "producer", uint64(b.N), uint64(b.N)*uint64(len(payload)))
 			})
 		}
 	}
@@ -132,7 +133,7 @@ func BenchmarkDirectAppendBatch(b *testing.B) {
 				}
 				b.StopTimer()
 				benchmarkCheckDurableEnd(b, partition, nextOffset)
-				benchmarkReportThroughput(b, nextOffset)
+				benchmarkReportThroughput(b, "producer", nextOffset, nextOffset*uint64(payloadSize))
 			})
 		}
 	}
@@ -157,7 +158,7 @@ func benchmarkIngressAppend(b *testing.B, batchRecords uint32, payloadSize int, 
 	}
 	b.StopTimer()
 	benchmarkCheckDurableEnd(b, partition, uint64(b.N))
-	benchmarkReportThroughput(b, uint64(b.N))
+	benchmarkReportThroughput(b, "producer", uint64(b.N), uint64(b.N)*uint64(payloadSize))
 }
 
 func runConcurrentAppends(b *testing.B, partition *storage.Partition, topic api.TopicID, payload []byte, producers int) error {
@@ -234,12 +235,14 @@ func benchmarkCheckDurableEnd(b *testing.B, partition *storage.Partition, expect
 	}
 }
 
-func benchmarkReportThroughput(b *testing.B, records uint64) {
+func benchmarkReportThroughput(b *testing.B, prefix string, records, payloadBytes uint64) {
 	b.Helper()
-	elapsed := b.Elapsed().Seconds()
-	if elapsed > 0 {
-		b.ReportMetric(float64(records)/elapsed, "records/s")
+	elapsedNanos := uint64(b.Elapsed())
+	if elapsedNanos == 0 {
+		return
 	}
+	b.ReportMetric(benchmarkmetrics.Rate(records, elapsedNanos), prefix+"-records/s")
+	b.ReportMetric(benchmarkmetrics.Rate(payloadBytes, elapsedNanos), prefix+"-bytes/s")
 }
 
 func benchmarkTopic() api.TopicID {

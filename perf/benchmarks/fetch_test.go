@@ -46,6 +46,7 @@ func BenchmarkFetch(b *testing.B) {
 			b.SetBytes(int64(benchmarkFetchBatchRecords) * 256)
 			b.ReportAllocs()
 			b.ResetTimer()
+			var fetchedRecords, fetchedBytes uint64
 			for index := 0; index < b.N; index++ {
 				offset := uint64(index%int(benchmarkTotalRecords/uint64(benchmarkFetchBatchRecords))) * uint64(benchmarkFetchBatchRecords)
 				if mode == "tail" {
@@ -58,9 +59,13 @@ func BenchmarkFetch(b *testing.B) {
 				if uint32(len(result.Records)) != benchmarkFetchBatchRecords {
 					b.Fatalf("fetched %d records, want %d", len(result.Records), benchmarkFetchBatchRecords)
 				}
+				fetchedRecords += uint64(len(result.Records))
+				for _, record := range result.Records {
+					fetchedBytes += uint64(len(record.Value))
+				}
 			}
 			b.StopTimer()
-			b.ReportMetric(float64(b.N)*float64(benchmarkFetchBatchRecords)/b.Elapsed().Seconds(), "records/s")
+			benchmarkReportThroughput(b, "consumer", fetchedRecords, fetchedBytes)
 		})
 	}
 }
@@ -77,12 +82,12 @@ func BenchmarkFetchParallel(b *testing.B) {
 	b.SetBytes(int64(benchmarkFetchBatchRecords) * 256)
 	b.ReportAllocs()
 	b.ResetTimer()
-	err := runConcurrentFetch(b, partition, fetchOptions, 8)
+	fetchedRecords, fetchedBytes, err := runConcurrentFetch(b, partition, fetchOptions, 8)
 	b.StopTimer()
 	if err != nil {
 		b.Fatal(err)
 	}
-	b.ReportMetric(float64(b.N)*float64(benchmarkFetchBatchRecords)/b.Elapsed().Seconds(), "records/s")
+	benchmarkReportThroughput(b, "consumer", fetchedRecords, fetchedBytes)
 }
 
 func benchmarkPopulate(b *testing.B, partition *storage.Partition, topic api.TopicID, total uint64, batchRecords uint32, payloadSize int) {
@@ -101,8 +106,10 @@ func benchmarkPopulate(b *testing.B, partition *storage.Partition, topic api.Top
 	}
 }
 
-func runConcurrentFetch(b *testing.B, partition *storage.Partition, options api.FetchOptions, readers int) error {
+func runConcurrentFetch(b *testing.B, partition *storage.Partition, options api.FetchOptions, readers int) (uint64, uint64, error) {
 	var next atomic.Uint64
+	var fetchedRecords atomic.Uint64
+	var fetchedBytes atomic.Uint64
 	var firstErr error
 	var errOnce sync.Once
 	var workers sync.WaitGroup
@@ -130,6 +137,10 @@ func runConcurrentFetch(b *testing.B, partition *storage.Partition, options api.
 					})
 					return
 				}
+				fetchedRecords.Add(uint64(len(result.Records)))
+				for _, record := range result.Records {
+					fetchedBytes.Add(uint64(len(record.Value)))
+				}
 				if result.NextOffset == benchmarkTotalRecords {
 					if err := reader.Seek(0); err != nil {
 						errOnce.Do(func() { firstErr = err })
@@ -140,5 +151,5 @@ func runConcurrentFetch(b *testing.B, partition *storage.Partition, options api.
 		}()
 	}
 	workers.Wait()
-	return firstErr
+	return fetchedRecords.Load(), fetchedBytes.Load(), firstErr
 }

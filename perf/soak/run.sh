@@ -9,6 +9,7 @@ Run the mixed workload soak with a dedicated data directory and captured evidenc
 
 Options:
   -d, --duration VALUE          Soak duration (default: 4h)
+  -p, --profile NAME            Workload profile: mixed or sustained (default: mixed)
   -s, --seed VALUE              Deterministic seed (default: 0x5eed5eed)
   -r, --reopen-interval VALUE   Store reopen interval (default: 10m)
   -a, --append-interval VALUE   Producer append interval (default: 20ms)
@@ -18,6 +19,7 @@ Options:
   -R, --run-dir PATH             Evidence directory (default: $HOME/immulog-soak-TIMESTAMP)
   -D, --data-dir PATH            Soak data directory (default: RUN_DIR/data)
   -L, --log-file PATH            Test log (default: RUN_DIR/soak.log)
+  -M, --metrics-file PATH         Structured metrics (default: RUN_DIR/metrics.json)
   -E, --environment-file PATH    Environment capture (default: RUN_DIR/environment.txt)
   -h, --help, help               Show this help
 
@@ -34,8 +36,10 @@ cd "$repo_root"
 run_root="$HOME/immulog-soak-$(date +%Y%m%d-%H%M%S)"
 data_dir=''
 log_file=''
+metrics_file=''
 environment_file=''
 duration=4h
+profile=mixed
 seed=0x5eed5eed
 reopen_interval=10m
 append_interval=20ms
@@ -59,6 +63,12 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--duration=*) duration=${1#*=}; shift ;;
+	-p|--profile)
+		require_value "$@"
+		profile=$2
+		shift 2
+		;;
+	--profile=*) profile=${1#*=}; shift ;;
 	-s|--seed)
 		require_value "$@"
 		seed=$2
@@ -113,6 +123,12 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--log-file=*) log_file=${1#*=}; shift ;;
+	-M|--metrics-file)
+		require_value "$@"
+		metrics_file=$2
+		shift 2
+		;;
+	--metrics-file=*) metrics_file=${1#*=}; shift ;;
 	-E|--environment-file)
 		require_value "$@"
 		environment_file=$2
@@ -147,6 +163,9 @@ fi
 if [[ -z "$log_file" ]]; then
 	log_file="$run_root/soak.log"
 fi
+if [[ -z "$metrics_file" ]]; then
+	metrics_file="$run_root/metrics.json"
+fi
 if [[ -z "$environment_file" ]]; then
 	environment_file="$run_root/environment.txt"
 fi
@@ -161,6 +180,10 @@ if [[ "$minimum_free_bytes" != auto && ! "$minimum_free_bytes" =~ ^[0-9]+$ ]]; t
 fi
 if [[ "$minimum_open_files" != auto && ! "$minimum_open_files" =~ ^[0-9]+$ ]]; then
 	echo "minimum open files must be auto or a nonnegative integer" >&2
+	exit 2
+fi
+if [[ "$profile" != mixed && "$profile" != sustained ]]; then
+	echo "profile must be mixed or sustained" >&2
 	exit 2
 fi
 
@@ -194,7 +217,7 @@ next_power_of_two() {
 	printf '%s\n' "$power"
 }
 
-mkdir -p "$data_dir" "$(dirname "$log_file")" "$(dirname "$environment_file")"
+mkdir -p "$data_dir" "$(dirname "$log_file")" "$(dirname "$metrics_file")" "$(dirname "$environment_file")"
 free_bytes() {
 	df --output=avail -B1 "$1" | tail -n 1 | tr -d ' '
 }
@@ -242,6 +265,7 @@ fi
 	printf 'commit=%s\n' "$(git rev-parse HEAD)"
 	printf 'branch=%s\n' "$(git branch --show-current)"
 	printf 'duration=%s\n' "$duration"
+	printf 'profile=%s\n' "$profile"
 	printf 'duration_seconds=%s\n' "$duration_seconds"
 	printf 'seed=%s\n' "$seed"
 	printf 'reopen_interval=%s\n' "$reopen_interval"
@@ -254,6 +278,7 @@ fi
 	printf 'initial_free_bytes=%s\n' "$initial_free_bytes"
 	printf 'initial_data_bytes=%s\n' "$initial_data_bytes"
 	printf 'data_dir=%s\n' "$data_dir"
+	printf 'metrics_file=%s\n' "$metrics_file"
 	go version
 	go env GOOS GOARCH GOAMD64 GOMAXPROCS
 	grep -m1 'model name' /proc/cpuinfo
@@ -265,10 +290,12 @@ fi
 set +e
 IMMULOG_SOAK=1 \
 IMMULOG_SOAK_DIR="$data_dir" \
+IMMULOG_SOAK_PROFILE="$profile" \
 IMMULOG_SOAK_SEED="$seed" \
 IMMULOG_SOAK_DURATION="$duration" \
 IMMULOG_SOAK_REOPEN_INTERVAL="$reopen_interval" \
 IMMULOG_SOAK_APPEND_INTERVAL="$append_interval" \
+IMMULOG_SOAK_METRICS_FILE="$metrics_file" \
 go test -v ./perf/soak -run '^TestMixedWorkloadSoak$' -count=1 -timeout="$timeout" 2>&1 | tee "$log_file"
 status=${PIPESTATUS[0]}
 set -e
