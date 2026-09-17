@@ -74,15 +74,22 @@ Run a short, fixed-seed workload smoke with verbose metrics:
 perf/soak/run.sh \
   --duration 20s \
   --timeout 90s \
-  --seed 0x5eed5eed
+  --seed 0x5eed5eed \
+  --minimum-free-bytes 0 \
+  --minimum-open-files 0
 ```
 
 The configurable `perf/soak/run.sh` runner captures the tested commit and
 host environment, writes the test log and checkpoint under a dedicated run
 directory, and preserves the Go test exit status. Its defaults are a four-hour
-duration, the fixed seed above, a 10-minute reopen interval, and a 20ms append
-interval. Use `perf/soak/run.sh --help` to view all duration, seed, interval,
-timeout, and path options.
+duration, the fixed seed above, a 10-minute reopen interval, a 20ms append
+interval, and duration-aware automatic resource estimates. The estimate uses
+1.5 MiB/s of growth plus a 2 GiB reserve and 2.5 log segments/second with
+headroom; for four hours this is approximately 24 GiB and 65,536 files. Use
+`perf/soak/run.sh --help` to view all duration, seed, interval, resource,
+timeout, and path options. Numeric resource values override the estimates and
+zero disables a preflight. The runner records initial/final data size, free
+space, and the process open-file limit.
 
 Run the same smoke under the race detector:
 
@@ -101,7 +108,9 @@ perf/soak/run.sh \
   --run-dir /path/to/dedicated/soak-run \
   --seed 0x5eed5eed \
   --duration 24h \
-  --timeout 25h
+  --timeout 25h \
+  --minimum-free-bytes auto \
+  --minimum-open-files auto
 ```
 
 The soak checkpoint makes clean resumable runs possible. Keep the directory

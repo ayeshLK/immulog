@@ -32,7 +32,7 @@ go test ./storage -run '^$' -fuzz=FuzzDecodeBatch -fuzztime=60m -parallel=1
 go test ./storage -run '^$' -fuzz=FuzzDecodeSegmentHeader -fuzztime=60m -parallel=1
 go test ./storage -run '^$' -fuzz=FuzzPreflightSystemLogSegment -fuzztime=60m -parallel=1
 go test ./perf/benchmarks -run '^$' -bench .
-perf/soak/run.sh --duration 20s --timeout 90s
+perf/soak/run.sh --duration 20s --timeout 90s --minimum-free-bytes 0 --minimum-open-files 0
 ```
 
 There is no separate build script; `go test ./...` compiles all packages.
