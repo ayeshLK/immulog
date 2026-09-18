@@ -107,13 +107,16 @@ headroom; for four hours this is approximately 24 GiB and 65,536 files. The
 `mixed` profile retains the cancellation/overload stress behavior used by the
 correctness soak. The `sustained` profile disables deliberate short-deadline
 and overload injection so acknowledged throughput and lag can be evaluated as
-a local durable-throughput workload. Use
-`perf/soak/run.sh --help` to view all duration, seed, interval, resource,
-timeout, and path options. Numeric resource values override the estimates and
-zero disables a preflight. The runner records initial/final data size, free
-space, and the process open-file limit, and writes a machine-readable
-`metrics.json` sidecar containing counters, resource observations, lag, oracle
-results, and latency bucket data.
+a local durable-throughput workload. Membership replacement remains enabled
+at a 750ms interval by default in both profiles; use
+`--churn-interval 0` for a consumer-throughput control run without deliberate
+assignment churn. Use `perf/soak/run.sh --help` to view all duration, seed,
+interval, resource, timeout, and path options. Numeric resource values override
+the estimates and zero disables a preflight. The runner records
+initial/final data size, free space, the churn interval, and the process
+open-file limit, and writes a machine-readable `metrics.json` sidecar
+containing counters, resource observations, per-partition delivery and lag,
+oracle results, and latency bucket data.
 
 ### Open-file limits for long runs
 
@@ -372,6 +375,171 @@ configured workload. It is not a 24-hour capacity result: at the observed
 segment and storage rates, substantially longer runs require larger disk and
 open-file limits. The result also does not establish power-loss, portability,
 or production-capacity guarantees.
+
+### Four-hour sustained workload qualification — 2026-09-17
+
+Evidence run: `/home/ayesh/immulog-soak-20260917-155444`. The run used commit
+`05eb0d5d44caef59a1f3ccb017a21072ae55792e`, branch `main`, Go `1.26.2`, Linux
+`7.0.0-31-generic`, an Intel Core i7-10510U with 8 logical CPUs, and ext4 on
+`/dev/mapper/ubuntu--vg-ubuntu--lv`.
+
+Configuration:
+
+```text
+duration=4h
+profile=sustained
+seed=0x5eed5eed
+reopen_interval=10m
+append_interval=20ms
+timeout=4h30m
+minimum_free_bytes=25769803776 (24 GiB)
+minimum_open_files=65536
+```
+
+The process ran for 4h05m23s including shutdown and verification. It exited
+with status 0 and reported `PASS`. All four independent partition oracles
+passed. The retained topics reported 5,215,937 and 5,270,456 verified records
+with 334 and 266 expected expirations; the stable topics reported 5,281,001
+and 5,278,469 verified records with no expirations. No corruption,
+discontinuity, duplicate delivery, or recovery failure was reported.
+
+The sustained profile disables deliberate overload and short-deadline
+cancellation. Workload counters were:
+
+| Metric | Result |
+|---|---:|
+| Offered append calls | 21,046,519 |
+| Acknowledged | 21,046,373 (99.9993%) |
+| Unknown outcome | 140 |
+| Known rejected | 6 |
+| Cancelled observations | 146 |
+| Overload-window calls | 0 |
+| Acknowledged bytes | 42,252,399,859 |
+| Acknowledged records/s, configured 4h | 1,461 |
+| Acknowledged bytes/s, configured 4h | 2,934,194 (2.93 MB/s) |
+
+Runtime and storage observations:
+
+| Metric | Result |
+|---|---:|
+| Initial free space | 123,613,425,664 bytes |
+| Final free space | 100,449,792,000 bytes |
+| Final data size | 22,961,852,725 bytes |
+| Maximum open files | 44,421 / 65,536 |
+| Maximum goroutines | 27 |
+| Maximum heap allocation | 3,227,474,848 bytes |
+| Maximum RSS | 4,088,864,768 bytes |
+| GC cycles | 34,149 |
+| Process read bytes | 183,758,938,112 |
+| Process write bytes | 96,765,956,096 |
+
+Consumer lag remained bounded but substantial: average delivery and commit
+lag were 27,296 records, with a maximum of 229,188 records across 60,133
+samples. The acknowledged-to-scan latency averaged 4.58ms with a 10ms p50
+bucket and 100ms p95/p99 buckets. Append latency averaged 4.10ms with a 10ms
+p50/p95 bucket and 100ms p99 bucket; poll averaged 3.13ms with 1ms p50, 10ms
+p95, and 100ms p99 buckets; commit averaged 4.21ms with 10ms p50/p95 and
+100ms p99 buckets; and verify averaged 2.40ms with 10ms p50/p95 and 100ms p99
+buckets.
+
+Ack-to-delivery latency reflects the consumer backlog rather than append
+latency: it averaged 119.85s, had a 1s p50 bucket, and had p95 and p99 in the
+open-ended `≥1s` bucket. This is a successful four-hour sustained durability,
+correctness, and bounded-resource run, and its acknowledged rate is useful
+local throughput evidence for this configuration. It is not a latency target
+or a production-capacity guarantee; the observed delivery lag should be
+investigated before treating the workload as healthy end-to-end sustained
+consumer throughput. The run also does not establish power-loss, portability,
+or storage-device-independent durability guarantees.
+
+### Four-hour sustained workload with per-partition consumer metrics — 2026-09-18
+
+Evidence run: `/home/ayesh/immulog-soak-20260917-225016`. The run used commit
+`05eb0d5d44caef59a1f3ccb017a21072ae55792e`, branch `main`, Go `1.26.2`, Linux
+`7.0.0-31-generic`, an Intel Core i7-10510U with 8 logical CPUs, and ext4 on
+`/dev/mapper/ubuntu--vg-ubuntu--lv`.
+
+Configuration:
+
+```text
+duration=4h
+profile=sustained
+seed=0x5eed5eed
+reopen_interval=10m
+append_interval=20ms
+timeout=4h30m
+minimum_free_bytes=25769803776 (24 GiB)
+minimum_open_files=65536
+```
+
+The test completed in 4h01m45s including shutdown and verification, exited with
+status 0, and reported `PASS`. All four independent partition oracles passed.
+The retained topics reported 5,297,831 and 5,362,204 verified records with
+298 and 256 expected expirations; the stable topics reported 5,372,214 and
+5,371,485 verified records with no expirations. No corruption, discontinuity,
+duplicate delivery, or recovery failure was reported.
+
+The sustained profile disables deliberate overload and short-deadline
+cancellation. Workload counters were:
+
+| Metric | Result |
+|---|---:|
+| Offered append calls | 21,404,334 |
+| Acknowledged | 21,404,201 (99.9994%) |
+| Unknown outcome | 131 |
+| Known rejected | 2 |
+| Cancelled observations | 133 |
+| Overload-window calls | 0 |
+| Acknowledged bytes | 42,970,599,312 |
+| Acknowledged records/s, configured 4h | 1,486 |
+| Acknowledged bytes/s, configured 4h | 2,984,069 (2.98 MB/s) |
+
+Per-partition consumer metrics used the full recorded measurement interval of
+14,504.66s for the delivery-rate calculation:
+
+| Partition | Delivered records | Delivery rate | Avg delivery lag | Max delivery lag | Assignment-loss events |
+|---|---:|---:|---:|---:|---:|
+| `soak-stable/0` | 5,200,172 | 358.5 records/s | 29,684 | 233,920 | 54,269 |
+| `soak-stable/1` | 5,174,650 | 356.8 records/s | 32,516 | 251,319 | 60,248 |
+
+The partitions were balanced within 0.5% of delivery rate. Neither partition
+had an empty poll; poll batches averaged 9.69 and 9.64 records, while commit
+batches averaged 10.87 and 10.95 records. The two partitions recorded 114,517
+assignment-loss events in total. This is a diagnostic observation from the
+harness, not proof that every event represents a distinct membership churn
+operation.
+
+Runtime and storage observations:
+
+| Metric | Result |
+|---|---:|
+| Initial free space | 123,752,935,424 bytes |
+| Final free space | 100,051,357,696 bytes |
+| Final data size | 23,352,895,385 bytes |
+| Maximum open files | 45,180 / 65,536 |
+| Maximum goroutines | 27 |
+| Maximum heap allocation | 3,218,811,680 bytes |
+| Maximum RSS | 3,668,885,504 bytes |
+| GC cycles | 34,018 |
+| Process read bytes | 229,460,484,096 |
+| Process write bytes | 97,966,284,800 |
+
+Append latency averaged 4.03ms with a 10ms p50/p95 bucket and 100ms p99
+bucket. Poll averaged 3.04ms with 1ms p50, 10ms p95, and 100ms p99 buckets;
+commit averaged 4.15ms with 10ms p50/p95 and 100ms p99 buckets; and verify
+averaged 2.35ms with 10ms p50/p95 and 100ms p99 buckets. Ack-to-scan latency
+averaged 4.67ms with 10ms p50 and 100ms p95/p99 buckets.
+
+Consumer lag increased relative to the previous four-hour sustained run:
+average delivery and commit lag rose from 27,296 to 31,095 records, and the
+maximum rose from 229,188 to 251,319. Ack-to-delivery latency averaged 134.84s,
+with a 1s p50 bucket and p95/p99 in the open-ended `≥1s` bucket. Poll and
+commit operation averages were slightly lower than the previous run, while
+delivery lag increased. The balanced partition rates and high assignment-loss
+count make membership churn and discarded consumer work important follow-up
+investigation targets. This is successful durability and correctness evidence,
+but not a healthy end-to-end consumer-latency result or a production-capacity
+guarantee.
 
 ## Interpretation and comparison policy
 

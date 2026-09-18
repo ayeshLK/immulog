@@ -13,6 +13,7 @@ Options:
   -s, --seed VALUE              Deterministic seed (default: 0x5eed5eed)
   -r, --reopen-interval VALUE   Store reopen interval (default: 10m)
   -a, --append-interval VALUE   Producer append interval (default: 20ms)
+  -c, --churn-interval VALUE    Membership replacement interval, or 0 to disable (default: 750ms)
   -t, --timeout VALUE            Go test timeout (default: 4h30m)
   -f, --minimum-free-bytes VALUE Minimum free space or auto (default: auto, ~24 GiB for 4h)
   -n, --minimum-open-files VALUE Minimum open-file limit or auto (default: auto, ~65536 for 4h)
@@ -43,6 +44,7 @@ profile=mixed
 seed=0x5eed5eed
 reopen_interval=10m
 append_interval=20ms
+churn_interval=750ms
 timeout=4h30m
 minimum_free_bytes=auto
 minimum_open_files=auto
@@ -87,6 +89,12 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--append-interval=*) append_interval=${1#*=}; shift ;;
+	-c|--churn-interval)
+		require_value "$@"
+		churn_interval=$2
+		shift 2
+		;;
+	--churn-interval=*) churn_interval=${1#*=}; shift ;;
 	-t|--timeout)
 		require_value "$@"
 		timeout=$2
@@ -270,6 +278,7 @@ fi
 	printf 'seed=%s\n' "$seed"
 	printf 'reopen_interval=%s\n' "$reopen_interval"
 	printf 'append_interval=%s\n' "$append_interval"
+	printf 'churn_interval=%s\n' "$churn_interval"
 	printf 'timeout=%s\n' "$timeout"
 	printf 'minimum_free_bytes=%s\n' "$minimum_free_bytes"
 	printf 'minimum_open_files=%s\n' "$minimum_open_files"
@@ -295,6 +304,7 @@ IMMULOG_SOAK_SEED="$seed" \
 IMMULOG_SOAK_DURATION="$duration" \
 IMMULOG_SOAK_REOPEN_INTERVAL="$reopen_interval" \
 IMMULOG_SOAK_APPEND_INTERVAL="$append_interval" \
+IMMULOG_SOAK_CHURN_INTERVAL="$churn_interval" \
 IMMULOG_SOAK_METRICS_FILE="$metrics_file" \
 go test -v ./perf/soak -run '^TestMixedWorkloadSoak$' -count=1 -timeout="$timeout" 2>&1 | tee "$log_file"
 status=${PIPESTATUS[0]}
