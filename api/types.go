@@ -133,14 +133,16 @@ type ExplicitStart struct {
 	Next      uint64
 }
 
-// ConsumerGroupMember declares one local member's unique subscriptions. A
-// complete OpenConsumerGroup call replaces the prior live membership snapshot.
+// ConsumerGroupMember declares one local member's unique subscriptions. An
+// OpenConsumerGroup call supplies the complete local membership snapshot;
+// equivalent live requests are coalesced, while changed requests replace it.
 type ConsumerGroupMember struct {
 	Subscriptions []TopicPartition
 }
 
 // ConsumerGroupOptions configures a complete same-process membership snapshot.
-// For GroupStartExplicit, ExplicitStarts must cover every subscribed key.
+// Equivalent options and membership reuse the current live snapshot. For
+// GroupStartExplicit, ExplicitStarts must cover every subscribed key.
 type ConsumerGroupOptions struct {
 	Start           GroupStart
 	ExplicitStarts  []ExplicitStart
