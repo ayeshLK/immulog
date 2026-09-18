@@ -245,9 +245,15 @@ if err := group.Commit(ctx, descriptor.ID, 0, result.NextOffset); err != nil {
 }
 ```
 
-A replacement snapshot fences every handle from the previous snapshot. The
-complete membership input is the assignment contract; this API does not
-perform network discovery or cross-process coordination.
+A changed replacement snapshot fences every handle from the previous snapshot.
+If the same live snapshot is opened again with equivalent canonical membership,
+effective fetch/progress options, and explicit-start settings, the existing
+handle is returned without a new durable generation. Aliases from coalesced
+opens refer to the same handle, so closing any alias closes that live snapshot.
+After a process restart, the first open installs a new assignment because live
+handles and fetch/progress settings are not persisted. The complete membership
+input remains the assignment contract; this API does not perform network
+discovery or cross-process coordination.
 
 ## Configure retention
 

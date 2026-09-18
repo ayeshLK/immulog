@@ -17,6 +17,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,12 +68,30 @@ func TestGroupConsumerPersistsMultiMemberAssignmentsAndFencesSnapshots(t *testin
 			t.Fatal(err)
 		}
 	}
-	second, err := store.OpenConsumerGroup(context.Background(), "workers", members, options)
+	same, err := store.OpenConsumerGroup(context.Background(), "workers", members, options)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if same != first {
+		t.Fatal("identical group open did not reuse the live consumer")
+	}
+	if first.generation != 1 {
+		t.Fatalf("coalesced generation = %d, want 1", first.generation)
+	}
+	replacementOptions := options
+	replacementOptions.Fetch.MaxRecords++
+	second, err := store.OpenConsumerGroup(context.Background(), "workers", members, replacementOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == first {
+		t.Fatal("changed group open reused the live consumer")
+	}
 	if _, err := first.Poll(context.Background(), descriptor.ID, 0, api.FetchOptions{}); !errors.Is(err, api.ErrAssignmentLost) {
 		t.Fatalf("stale group poll = %v, want ErrAssignmentLost", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close stale group = %v", err)
 	}
 	for partition := uint32(0); partition < 2; partition++ {
 		result, err := second.Poll(context.Background(), descriptor.ID, partition, api.FetchOptions{})
@@ -101,6 +120,251 @@ func TestGroupConsumerPersistsMultiMemberAssignmentsAndFencesSnapshots(t *testin
 		if err != nil || len(result.Records) != 0 || result.NextOffset != 2 {
 			t.Fatalf("restart poll partition %d = (%#v, %v)", partition, result, err)
 		}
+	}
+}
+
+func TestGroupConsumerCoalescesEquivalentSnapshots(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	descriptor, err := store.CreateTopic("coalesced-group", 2, PartitionOptions{BatchBytes: 4096, SegmentBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for partition := uint32(0); partition < 2; partition++ {
+		part, err := store.OpenPartition(descriptor.ID, partition, PartitionOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Append(context.Background(), api.AppendRequest{Topic: descriptor.ID, Partition: partition, Value: []byte("value")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	members := []api.ConsumerGroupMember{
+		{Subscriptions: []api.TopicPartition{{Topic: descriptor.ID, Partition: 1}, {Topic: descriptor.ID, Partition: 0}}},
+		{},
+	}
+	first, err := store.OpenConsumerGroup(context.Background(), "workers", members, api.ConsumerGroupOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := store.offsetsState.groups["workers"]
+	beforeGeneration, beforeAssignment := before.Generation, before.AssignmentOffset
+	equivalentMembers := []api.ConsumerGroupMember{
+		{},
+		{Subscriptions: []api.TopicPartition{{Topic: descriptor.ID, Partition: 0}, {Topic: descriptor.ID, Partition: 1}}},
+	}
+	equivalentOptions := api.ConsumerGroupOptions{
+		Start:           api.GroupStartEarliest,
+		Fetch:           api.FetchOptions{MaxRecords: 1024, MaxBytes: 4 << 20},
+		ProgressTimeout: 30 * time.Second,
+	}
+	second, err := store.OpenConsumerGroup(context.Background(), "workers", equivalentMembers, equivalentOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatal("equivalent group open did not reuse the live consumer")
+	}
+	after := store.offsetsState.groups["workers"]
+	if after.Generation != beforeGeneration || after.AssignmentOffset != beforeAssignment {
+		t.Fatalf("coalesced group changed durable assignment: generation %d/%d, assignment %d/%d", after.Generation, beforeGeneration, after.AssignmentOffset, beforeAssignment)
+	}
+	changedOptions := equivalentOptions
+	changedOptions.Fetch.MaxWait = time.Millisecond
+	third, err := store.OpenConsumerGroup(context.Background(), "workers", equivalentMembers, changedOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third == first {
+		t.Fatal("changed group options reused the live consumer")
+	}
+	if _, err := first.Poll(context.Background(), descriptor.ID, 0, api.FetchOptions{}); !errors.Is(err, api.ErrAssignmentLost) {
+		t.Fatalf("coalesced alias poll = %v, want ErrAssignmentLost after replacement", err)
+	}
+}
+
+func TestGroupConsumerCoalescedAliasesShareLifecycle(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	descriptor, err := store.CreateTopic("coalesced-alias-group", 1, PartitionOptions{BatchBytes: 4096, SegmentBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, err := store.OpenPartition(descriptor.ID, 0, PartitionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Append(context.Background(), api.AppendRequest{Topic: descriptor.ID, Partition: 0, Value: []byte("value")}); err != nil {
+		t.Fatal(err)
+	}
+	members := []api.ConsumerGroupMember{{Subscriptions: []api.TopicPartition{{Topic: descriptor.ID, Partition: 0}}}}
+	first, err := store.OpenConsumerGroup(context.Background(), "workers", members, api.ConsumerGroupOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.OpenConsumerGroup(context.Background(), "workers", members, api.ConsumerGroupOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatal("equivalent opens did not return an alias")
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Poll(context.Background(), descriptor.ID, 0, api.FetchOptions{}); !errors.Is(err, api.ErrClosed) {
+		t.Fatalf("poll through closed alias = %v, want ErrClosed", err)
+	}
+}
+
+func TestGroupConsumerCoalescesExplicitStartOrdering(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	descriptor, err := store.CreateTopic("explicit-coalesced-group", 2, PartitionOptions{BatchBytes: 4096, SegmentBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for partition := uint32(0); partition < 2; partition++ {
+		part, err := store.OpenPartition(descriptor.ID, partition, PartitionOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Append(context.Background(), api.AppendRequest{Topic: descriptor.ID, Partition: partition, Value: []byte("value")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	members := []api.ConsumerGroupMember{{Subscriptions: []api.TopicPartition{{Topic: descriptor.ID, Partition: 0}, {Topic: descriptor.ID, Partition: 1}}}}
+	firstOptions := api.ConsumerGroupOptions{
+		Start: api.GroupStartExplicit,
+		ExplicitStarts: []api.ExplicitStart{
+			{Topic: descriptor.ID, Partition: 0, Next: 0},
+			{Topic: descriptor.ID, Partition: 1, Next: 0},
+		},
+	}
+	first, err := store.OpenConsumerGroup(context.Background(), "workers", members, firstOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondOptions := firstOptions
+	secondOptions.ExplicitStarts = []api.ExplicitStart{firstOptions.ExplicitStarts[1], firstOptions.ExplicitStarts[0]}
+	second, err := store.OpenConsumerGroup(context.Background(), "workers", members, secondOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatal("explicit-start ordering change did not coalesce")
+	}
+	changedOptions := firstOptions
+	changedOptions.ExplicitStarts = []api.ExplicitStart{
+		{Topic: descriptor.ID, Partition: 0, Next: 1},
+		{Topic: descriptor.ID, Partition: 1, Next: 0},
+	}
+	if _, err := store.OpenConsumerGroup(context.Background(), "workers", members, changedOptions); !errors.Is(err, api.ErrInvalidArgument) {
+		t.Fatalf("changed explicit start error = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestGroupConsumerCoalescesConcurrentEquivalentOpens(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	descriptor, err := store.CreateTopic("concurrent-coalesced-group", 1, PartitionOptions{BatchBytes: 4096, SegmentBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, err := store.OpenPartition(descriptor.ID, 0, PartitionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Append(context.Background(), api.AppendRequest{Topic: descriptor.ID, Partition: 0, Value: []byte("value")}); err != nil {
+		t.Fatal(err)
+	}
+	members := []api.ConsumerGroupMember{{Subscriptions: []api.TopicPartition{{Topic: descriptor.ID, Partition: 0}}}}
+	first, err := store.OpenConsumerGroup(context.Background(), "workers", members, api.ConsumerGroupOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := store.offsetsState.groups["workers"]
+	beforeGeneration, beforeAssignment := before.Generation, before.AssignmentOffset
+	results := make(chan *GroupConsumer, 8)
+	errs := make(chan error, 8)
+	var waitGroup sync.WaitGroup
+	for index := 0; index < 8; index++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			consumer, openErr := store.OpenConsumerGroup(context.Background(), "workers", members, api.ConsumerGroupOptions{})
+			if openErr != nil {
+				errs <- openErr
+				return
+			}
+			results <- consumer
+		}()
+	}
+	waitGroup.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	for consumer := range results {
+		if consumer != first {
+			t.Fatal("concurrent equivalent open returned a different consumer")
+		}
+	}
+	after := store.offsetsState.groups["workers"]
+	if after.Generation != beforeGeneration || after.AssignmentOffset != beforeAssignment {
+		t.Fatalf("concurrent coalescing changed durable assignment: generation %d/%d, assignment %d/%d", after.Generation, beforeGeneration, after.AssignmentOffset, beforeAssignment)
+	}
+}
+
+func TestGroupConsumerDoesNotCoalesceExpiredSnapshot(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	descriptor, err := store.CreateTopic("expired-coalesced-group", 1, PartitionOptions{BatchBytes: 4096, SegmentBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, err := store.OpenPartition(descriptor.ID, 0, PartitionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Append(context.Background(), api.AppendRequest{Topic: descriptor.ID, Partition: 0, Value: []byte("value")}); err != nil {
+		t.Fatal(err)
+	}
+	members := []api.ConsumerGroupMember{{Subscriptions: []api.TopicPartition{{Topic: descriptor.ID, Partition: 0}}}}
+	options := api.ConsumerGroupOptions{ProgressTimeout: time.Millisecond}
+	first, err := store.OpenConsumerGroup(context.Background(), "workers", members, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	second, err := store.OpenConsumerGroup(context.Background(), "workers", members, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == first {
+		t.Fatal("expired group open reused the expired consumer")
+	}
+	if second.generation != first.generation+1 {
+		t.Fatalf("expired replacement generation = %d, want %d", second.generation, first.generation+1)
+	}
+	if _, err := first.Poll(context.Background(), descriptor.ID, 0, api.FetchOptions{}); !errors.Is(err, api.ErrAssignmentLost) {
+		t.Fatalf("expired consumer poll = %v, want ErrAssignmentLost", err)
 	}
 }
 

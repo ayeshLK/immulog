@@ -34,6 +34,7 @@ type GroupConsumer struct {
 	generation      uint64
 	fetch           api.FetchOptions
 	progressTimeout time.Duration
+	membership      canonicalGroupMembership
 	members         map[[16]byte]*groupMember
 	cursors         map[topicKey]*groupCursor
 	closed          bool
@@ -44,6 +45,12 @@ type groupMember struct {
 	subscriptions []topicKey
 	deadline      time.Time
 }
+
+type canonicalGroupMember struct {
+	subscriptions []topicKey
+}
+
+type canonicalGroupMembership []canonicalGroupMember
 
 type groupCursor struct {
 	key       topicKey
@@ -60,9 +67,10 @@ type groupAssignment struct {
 	createBaseline bool
 }
 
-// OpenConsumerGroup atomically replaces a group's complete local membership
-// snapshot. Every member gets a fresh session and every returned cursor is
-// fenced by the resulting durable generation.
+// OpenConsumerGroup installs a group's complete local membership snapshot.
+// An equivalent request reuses the current live snapshot without advancing its
+// durable generation; a changed request creates fresh member sessions and
+// fences the previous handle.
 func (s *Store) OpenConsumerGroup(ctx context.Context, groupID string, members []api.ConsumerGroupMember, options api.ConsumerGroupOptions) (*GroupConsumer, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -76,7 +84,7 @@ func (s *Store) OpenConsumerGroup(ctx context.Context, groupID string, members [
 	if err := normalizeConsumerGroupOptions(&options); err != nil {
 		return nil, err
 	}
-	prepared, keys, err := prepareGroupMembers(members)
+	canonical, keys, err := canonicalGroupMembers(members)
 	if err != nil {
 		return nil, err
 	}
@@ -107,6 +115,16 @@ func (s *Store) OpenConsumerGroup(ctx context.Context, groupID string, members [
 		return nil, api.ErrGroupUnavailable
 	}
 	group := s.offsetsState.groups[groupID]
+	if current := s.groupConsumers[groupID]; current != nil {
+		live, expired := s.liveGroupConsumerLocked(groupID, current, group)
+		if expired {
+			delete(s.groupConsumers, groupID)
+			s.expiredGroups[groupID] = true
+		}
+		if live && groupConsumerMatches(current, group, canonical, options, starts) {
+			return current, nil
+		}
+	}
 	addGroups := uint64(0)
 	if group == nil {
 		addGroups = 1
@@ -153,6 +171,10 @@ func (s *Store) OpenConsumerGroup(ctx context.Context, groupID string, members [
 	}
 	if group.Generation == ^uint64(0) {
 		return nil, errors.Join(api.ErrResourceLimit, errors.New("consumer group generation is exhausted"))
+	}
+	prepared, err := prepareGroupMembers(canonical)
+	if err != nil {
+		return nil, err
 	}
 	assignments := make([]groupAssignment, 0, len(keys))
 	cursors := make(map[topicKey]*groupCursor, len(keys))
@@ -207,9 +229,55 @@ func (s *Store) OpenConsumerGroup(ctx context.Context, groupID string, members [
 		member.deadline = deadline
 		memberState[member.session] = &member
 	}
-	consumer := &GroupConsumer{store: s, groupID: groupID, generation: group.Generation, fetch: options.Fetch, progressTimeout: options.ProgressTimeout, members: memberState, cursors: cursors}
+	consumer := &GroupConsumer{store: s, groupID: groupID, generation: group.Generation, fetch: options.Fetch, progressTimeout: options.ProgressTimeout, membership: canonical, members: memberState, cursors: cursors}
 	s.groupConsumers[groupID] = consumer
 	return consumer, nil
+}
+
+func (s *Store) liveGroupConsumerLocked(groupID string, consumer *GroupConsumer, group *offsetGroup) (live, expired bool) {
+	if consumer == nil || consumer.closed || s.groupConsumers[groupID] != consumer || group == nil || group.Generation != consumer.generation || group.AssignmentInstance != [16]byte(s.storeID) {
+		return false, false
+	}
+	now := time.Now()
+	for _, member := range consumer.members {
+		if !now.Before(member.deadline) {
+			return false, true
+		}
+	}
+	if len(group.AssignmentMember) != len(consumer.members) || len(group.AssignmentOwner) != len(consumer.cursors) {
+		return false, false
+	}
+	for session := range consumer.members {
+		if _, exists := group.AssignmentMember[session]; !exists {
+			return false, false
+		}
+	}
+	for key, cursor := range consumer.cursors {
+		if owner, exists := group.AssignmentOwner[key]; !exists || owner != cursor.owner {
+			return false, false
+		}
+	}
+	return true, false
+}
+
+func groupConsumerMatches(consumer *GroupConsumer, group *offsetGroup, membership canonicalGroupMembership, options api.ConsumerGroupOptions, starts map[topicKey]uint64) bool {
+	return equalCanonicalGroupMembers(consumer.membership, membership) &&
+		consumer.fetch == options.Fetch &&
+		consumer.progressTimeout == options.ProgressTimeout &&
+		group.CreationStartMode == uint8(options.Start) &&
+		equalExplicitStarts(group.ExplicitStarts, starts)
+}
+
+func equalExplicitStarts(left, right map[topicKey]uint64) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if other, exists := right[key]; !exists || other != value {
+			return false
+		}
+	}
+	return true
 }
 
 // Poll fetches one explicitly subscribed partition under this group snapshot.
@@ -444,22 +512,22 @@ func normalizeConsumerGroupOptions(options *api.ConsumerGroupOptions) error {
 	if options.ProgressTimeout < minConsumerProgressTimeout || options.ProgressTimeout > maxConsumerProgressTimeout {
 		return errors.Join(api.ErrInvalidArgument, fmt.Errorf("consumer group progress timeout %s is outside [%s, %s]", options.ProgressTimeout, minConsumerProgressTimeout, maxConsumerProgressTimeout))
 	}
-	_, err := normalizeFetchOptions(options.Fetch)
-	return err
+	fetch, err := normalizeFetchOptions(options.Fetch)
+	if err != nil {
+		return err
+	}
+	options.Fetch = fetch
+	return nil
 }
 
-func prepareGroupMembers(specs []api.ConsumerGroupMember) ([]groupMember, map[topicKey]struct{}, error) {
+func canonicalGroupMembers(specs []api.ConsumerGroupMember) (canonicalGroupMembership, map[topicKey]struct{}, error) {
 	if len(specs) == 0 || len(specs) > maxAssignmentMembers {
 		return nil, nil, errors.Join(api.ErrInvalidArgument, errors.New("consumer group member count is outside limits"))
 	}
-	members := make([]groupMember, len(specs))
+	members := make(canonicalGroupMembership, len(specs))
 	keys := make(map[topicKey]struct{})
 	for index, spec := range specs {
-		session, err := newConsumerSession()
-		if err != nil {
-			return nil, nil, err
-		}
-		member := groupMember{session: session, subscriptions: make([]topicKey, len(spec.Subscriptions))}
+		member := canonicalGroupMember{subscriptions: make([]topicKey, len(spec.Subscriptions))}
 		for subIndex, subscription := range spec.Subscriptions {
 			if subscription.Topic.IsZero() || subscription.Topic == api.ClusterMetadataTopicID || subscription.Topic == api.ConsumerOffsetsTopicID || subscription.Partition > int32Max {
 				return nil, nil, errors.Join(api.ErrInvalidArgument, errors.New("consumer group subscription is invalid"))
@@ -484,14 +552,56 @@ func prepareGroupMembers(specs []api.ConsumerGroupMember) ([]groupMember, map[to
 		members[index] = member
 	}
 	sort.Slice(members, func(left, right int) bool {
+		return compareCanonicalGroupMember(members[left], members[right]) < 0
+	})
+	return members, keys, nil
+}
+
+func prepareGroupMembers(canonical canonicalGroupMembership) ([]groupMember, error) {
+	members := make([]groupMember, len(canonical))
+	for index, spec := range canonical {
+		session, err := newConsumerSession()
+		if err != nil {
+			return nil, err
+		}
+		members[index] = groupMember{session: session, subscriptions: append([]topicKey(nil), spec.subscriptions...)}
+	}
+	sort.Slice(members, func(left, right int) bool {
 		return string(members[left].session[:]) < string(members[right].session[:])
 	})
 	for index := 1; index < len(members); index++ {
 		if members[index-1].session == members[index].session {
-			return nil, nil, errors.Join(api.ErrResourceLimit, errors.New("consumer group session ID collision"))
+			return nil, errors.Join(api.ErrResourceLimit, errors.New("consumer group session ID collision"))
 		}
 	}
-	return members, keys, nil
+	return members, nil
+}
+
+func compareCanonicalGroupMember(left, right canonicalGroupMember) int {
+	for index := 0; index < len(left.subscriptions) && index < len(right.subscriptions); index++ {
+		if comparison := compareTopicKey(left.subscriptions[index], right.subscriptions[index]); comparison != 0 {
+			return comparison
+		}
+	}
+	if len(left.subscriptions) < len(right.subscriptions) {
+		return -1
+	}
+	if len(left.subscriptions) > len(right.subscriptions) {
+		return 1
+	}
+	return 0
+}
+
+func equalCanonicalGroupMembers(left, right canonicalGroupMembership) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if compareCanonicalGroupMember(left[index], right[index]) != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func explicitStartMap(starts []api.ExplicitStart) (map[topicKey]uint64, error) {
