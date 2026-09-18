@@ -115,8 +115,8 @@ interval, resource, timeout, and path options. Numeric resource values override
 the estimates and zero disables a preflight. The runner records
 initial/final data size, free space, the churn interval, and the process
 open-file limit, and writes a machine-readable `metrics.json` sidecar
-containing counters, resource observations, per-partition delivery and lag,
-oracle results, and latency bucket data.
+containing counters, resource observations, aggregate and per-partition
+delivery records/bytes/rates and lag, oracle results, and latency bucket data.
 
 ### Open-file limits for long runs
 

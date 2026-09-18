@@ -111,6 +111,7 @@ type soakOracle struct {
 
 type soakPartitionMetrics struct {
 	deliveredRecords atomic.Uint64
+	deliveredBytes   atomic.Uint64
 	pollOps          atomic.Uint64
 	pollRecords      atomic.Uint64
 	emptyPolls       atomic.Uint64
@@ -133,6 +134,7 @@ type soakMetrics struct {
 	cancelled              atomic.Uint64
 	overloadCalls          atomic.Uint64
 	acknowledgedBytes      atomic.Uint64
+	deliveredBytes         atomic.Uint64
 	maxGoroutines          atomic.Uint64
 	maxOpenFiles           atomic.Uint64
 	maxHeapBytes           atomic.Uint64
@@ -318,21 +320,23 @@ type soakOracleReport struct {
 }
 
 type soakPartitionReport struct {
-	DeliveredRecords   uint64  `json:"delivered_records"`
-	DeliveryRate       float64 `json:"delivery_rate_records_per_second"`
-	Polls              uint64  `json:"polls"`
-	PolledRecords      uint64  `json:"polled_records"`
-	AveragePollBatch   float64 `json:"average_poll_batch"`
-	EmptyPolls         uint64  `json:"empty_polls"`
-	Commits            uint64  `json:"commits"`
-	CommittedRecords   uint64  `json:"committed_records"`
-	AverageCommitBatch float64 `json:"average_commit_batch"`
-	AssignmentLost     uint64  `json:"assignment_lost"`
-	LagSamples         uint64  `json:"lag_samples"`
-	AverageDeliveryLag uint64  `json:"average_delivery_lag"`
-	MaxDeliveryLag     uint64  `json:"max_delivery_lag"`
-	AverageCommitLag   uint64  `json:"average_commit_lag"`
-	MaxCommitLag       uint64  `json:"max_commit_lag"`
+	DeliveredRecords      uint64  `json:"delivered_records"`
+	DeliveredPayloadBytes uint64  `json:"delivered_payload_bytes"`
+	DeliveryRate          float64 `json:"delivery_rate_records_per_second"`
+	DeliveryByteRate      float64 `json:"delivery_rate_payload_bytes_per_second"`
+	Polls                 uint64  `json:"polls"`
+	PolledRecords         uint64  `json:"polled_records"`
+	AveragePollBatch      float64 `json:"average_poll_batch"`
+	EmptyPolls            uint64  `json:"empty_polls"`
+	Commits               uint64  `json:"commits"`
+	CommittedRecords      uint64  `json:"committed_records"`
+	AverageCommitBatch    float64 `json:"average_commit_batch"`
+	AssignmentLost        uint64  `json:"assignment_lost"`
+	LagSamples            uint64  `json:"lag_samples"`
+	AverageDeliveryLag    uint64  `json:"average_delivery_lag"`
+	MaxDeliveryLag        uint64  `json:"max_delivery_lag"`
+	AverageCommitLag      uint64  `json:"average_commit_lag"`
+	MaxCommitLag          uint64  `json:"max_commit_lag"`
 }
 
 type soakMetricsReport struct {
@@ -346,6 +350,7 @@ type soakMetricsReport struct {
 	Cancelled          uint64                         `json:"cancelled"`
 	OverloadCalls      uint64                         `json:"overload_calls"`
 	AcknowledgedBytes  uint64                         `json:"acknowledged_bytes"`
+	DeliveredBytes     uint64                         `json:"delivered_payload_bytes"`
 	MaxGoroutines      uint64                         `json:"max_goroutines"`
 	MaxOpenFiles       uint64                         `json:"max_open_files"`
 	MaxHeapBytes       uint64                         `json:"max_heap_bytes"`
@@ -386,6 +391,7 @@ func writeSoakMetrics(path string, metrics *soakMetrics, oracles map[string]*soa
 		Cancelled:          metrics.cancelled.Load(),
 		OverloadCalls:      metrics.overloadCalls.Load(),
 		AcknowledgedBytes:  metrics.acknowledgedBytes.Load(),
+		DeliveredBytes:     metrics.deliveredBytes.Load(),
 		MaxGoroutines:      metrics.maxGoroutines.Load(),
 		MaxOpenFiles:       metrics.maxOpenFiles.Load(),
 		MaxHeapBytes:       metrics.maxHeapBytes.Load(),
@@ -981,7 +987,10 @@ func groupLoop(ctx context.Context, handle *soakGroupHandle, topic api.TopicID, 
 				report(err)
 				return
 			}
+			deliveredBytes := soakRecordPayloadBytes(result.Records)
 			partitionMetrics.deliveredRecords.Add(uint64(len(result.Records)))
+			partitionMetrics.deliveredBytes.Add(deliveredBytes)
+			metrics.deliveredBytes.Add(deliveredBytes)
 			if len(result.Records) == 0 {
 				partitionMetrics.emptyPolls.Add(1)
 				continue
@@ -1023,6 +1032,14 @@ func groupLoop(ctx context.Context, handle *soakGroupHandle, topic api.TopicID, 
 			}
 		}
 	}
+}
+
+func soakRecordPayloadBytes(records []api.Record) uint64 {
+	var total uint64
+	for _, record := range records {
+		total += uint64(len(record.Value))
+	}
+	return total
 }
 
 func validateSoakDelivery(result api.FetchResult, topic api.TopicID, partition uint32, oracle *soakOracle) error {
@@ -1553,21 +1570,23 @@ func (metrics *soakMetrics) partitionReport(partition int, elapsed time.Duration
 		averageCommitLag = partitionMetrics.commitLagTotal.Load() / lagSamples
 	}
 	return soakPartitionReport{
-		DeliveredRecords:   partitionMetrics.deliveredRecords.Load(),
-		DeliveryRate:       float64(partitionMetrics.deliveredRecords.Load()) / elapsed.Seconds(),
-		Polls:              polls,
-		PolledRecords:      partitionMetrics.pollRecords.Load(),
-		AveragePollBatch:   averageBatchSize(partitionMetrics.pollRecords.Load(), polls),
-		EmptyPolls:         partitionMetrics.emptyPolls.Load(),
-		Commits:            commits,
-		CommittedRecords:   partitionMetrics.commitRecords.Load(),
-		AverageCommitBatch: averageBatchSize(partitionMetrics.commitRecords.Load(), commits),
-		AssignmentLost:     partitionMetrics.assignmentLost.Load(),
-		LagSamples:         lagSamples,
-		AverageDeliveryLag: averageDeliveryLag,
-		MaxDeliveryLag:     partitionMetrics.maxDeliveryLag.Load(),
-		AverageCommitLag:   averageCommitLag,
-		MaxCommitLag:       partitionMetrics.maxCommitLag.Load(),
+		DeliveredRecords:      partitionMetrics.deliveredRecords.Load(),
+		DeliveredPayloadBytes: partitionMetrics.deliveredBytes.Load(),
+		DeliveryRate:          float64(partitionMetrics.deliveredRecords.Load()) / elapsed.Seconds(),
+		DeliveryByteRate:      float64(partitionMetrics.deliveredBytes.Load()) / elapsed.Seconds(),
+		Polls:                 polls,
+		PolledRecords:         partitionMetrics.pollRecords.Load(),
+		AveragePollBatch:      averageBatchSize(partitionMetrics.pollRecords.Load(), polls),
+		EmptyPolls:            partitionMetrics.emptyPolls.Load(),
+		Commits:               commits,
+		CommittedRecords:      partitionMetrics.commitRecords.Load(),
+		AverageCommitBatch:    averageBatchSize(partitionMetrics.commitRecords.Load(), commits),
+		AssignmentLost:        partitionMetrics.assignmentLost.Load(),
+		LagSamples:            lagSamples,
+		AverageDeliveryLag:    averageDeliveryLag,
+		MaxDeliveryLag:        partitionMetrics.maxDeliveryLag.Load(),
+		AverageCommitLag:      averageCommitLag,
+		MaxCommitLag:          partitionMetrics.maxCommitLag.Load(),
 	}
 }
 
@@ -1667,7 +1686,7 @@ func (metrics *soakMetrics) summary() string {
 		metrics.latencySummary("offer_to_delivery", &metrics.offerToDeliveryOps, &metrics.offerToDeliveryNanos, &metrics.offerToDeliveryBuckets),
 		metrics.latencySummary("ack_to_delivery", &metrics.ackToDeliveryOps, &metrics.ackToDeliveryNanos, &metrics.ackToDeliveryBuckets),
 	}
-	return fmt.Sprintf("offered=%d acknowledged=%d unknown=%d known_rejected=%d cancelled=%d overload_calls=%d acknowledged_bytes=%d max_goroutines=%d max_open_files=%d max_heap_bytes=%d max_rss_bytes=%d gc_cycles=%d process_read_bytes=%d process_write_bytes=%d process_user_ticks=%d process_system_ticks=%d lag_samples=%d average_delivery_lag=%d max_delivery_lag=%d average_commit_lag=%d max_commit_lag=%d %s", metrics.offered.Load(), metrics.acknowledged.Load(), metrics.unknown.Load(), metrics.knownRejected.Load(), metrics.cancelled.Load(), metrics.overloadCalls.Load(), metrics.acknowledgedBytes.Load(), metrics.maxGoroutines.Load(), metrics.maxOpenFiles.Load(), metrics.maxHeapBytes.Load(), metrics.maxRSSBytes.Load(), metrics.gcCycles.Load(), metrics.processReadBytes.Load(), metrics.processWriteBytes.Load(), metrics.processUserTicks.Load(), metrics.processSystemTicks.Load(), lagSamples, averageDeliveryLag, metrics.maxDeliveryLag.Load(), averageCommitLag, metrics.maxCommitLag.Load(), strings.Join(latencies, " "))
+	return fmt.Sprintf("offered=%d acknowledged=%d unknown=%d known_rejected=%d cancelled=%d overload_calls=%d acknowledged_bytes=%d delivered_payload_bytes=%d max_goroutines=%d max_open_files=%d max_heap_bytes=%d max_rss_bytes=%d gc_cycles=%d process_read_bytes=%d process_write_bytes=%d process_user_ticks=%d process_system_ticks=%d lag_samples=%d average_delivery_lag=%d max_delivery_lag=%d average_commit_lag=%d max_commit_lag=%d %s", metrics.offered.Load(), metrics.acknowledged.Load(), metrics.unknown.Load(), metrics.knownRejected.Load(), metrics.cancelled.Load(), metrics.overloadCalls.Load(), metrics.acknowledgedBytes.Load(), metrics.deliveredBytes.Load(), metrics.maxGoroutines.Load(), metrics.maxOpenFiles.Load(), metrics.maxHeapBytes.Load(), metrics.maxRSSBytes.Load(), metrics.gcCycles.Load(), metrics.processReadBytes.Load(), metrics.processWriteBytes.Load(), metrics.processUserTicks.Load(), metrics.processSystemTicks.Load(), lagSamples, averageDeliveryLag, metrics.maxDeliveryLag.Load(), averageCommitLag, metrics.maxCommitLag.Load(), strings.Join(latencies, " "))
 }
 
 func (metrics *soakMetrics) latencySummary(name string, operations, nanos *atomic.Uint64, buckets *[soakLatencyBucketCount]atomic.Uint64) string {
