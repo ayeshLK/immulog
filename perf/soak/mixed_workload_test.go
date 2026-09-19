@@ -125,6 +125,13 @@ type soakPartitionMetrics struct {
 	maxCommitLag     atomic.Uint64
 }
 
+type soakConsumerProgress struct {
+	lastPollStarted    [soakPartitionCount]atomic.Int64
+	lastPollCompleted  [soakPartitionCount]atomic.Int64
+	lastCommitStarted  [soakPartitionCount]atomic.Int64
+	lastCommitFinished [soakPartitionCount]atomic.Int64
+}
+
 type soakMetrics struct {
 	partitions             [soakPartitionCount]soakPartitionMetrics
 	offered                atomic.Uint64
@@ -949,7 +956,20 @@ func scannerLoop(ctx context.Context, partition *storage.Partition, oracle *soak
 	}
 }
 
+func (progress *soakConsumerProgress) diagnostic(partition uint32) string {
+	index := int(partition)
+	return fmt.Sprintf("last_poll_started_ago=%s last_poll_completed_ago=%s last_commit_started_ago=%s last_commit_finished_ago=%s", elapsedSince(progress.lastPollStarted[index].Load()), elapsedSince(progress.lastPollCompleted[index].Load()), elapsedSince(progress.lastCommitStarted[index].Load()), elapsedSince(progress.lastCommitFinished[index].Load()))
+}
+
+func elapsedSince(timestamp int64) string {
+	if timestamp == 0 {
+		return "never"
+	}
+	return time.Since(time.Unix(0, timestamp)).Round(time.Millisecond).String()
+}
+
 func groupLoop(ctx context.Context, handle *soakGroupHandle, topic api.TopicID, partitions []*storage.Partition, oracles map[string]*soakOracle, metrics *soakMetrics, report func(error)) {
+	var progress soakConsumerProgress
 	for {
 		if ctx.Err() != nil {
 			return
@@ -961,6 +981,7 @@ func groupLoop(ctx context.Context, handle *soakGroupHandle, topic api.TopicID, 
 		for partition := uint32(0); partition < uint32(len(partitions)); partition++ {
 			partitionMetrics := &metrics.partitions[partition]
 			partitionMetrics.pollOps.Add(1)
+			progress.lastPollStarted[partition].Store(time.Now().UnixNano())
 			pollContext, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
 			pollStarted := time.Now()
 			result, err := consumer.Poll(pollContext, topic, partition, api.FetchOptions{MaxRecords: 16, MaxBytes: 128 << 10, MaxWait: 5 * time.Millisecond})
@@ -972,7 +993,7 @@ func groupLoop(ctx context.Context, handle *soakGroupHandle, topic api.TopicID, 
 						partitionMetrics.assignmentLost.Add(1)
 						replacement, waitErr := waitForSoakConsumerReplacement(ctx, handle, consumer)
 						if waitErr != nil {
-							report(fmt.Errorf("soak group assignment lost on partition %d without replacement: %w", partition, waitErr))
+							report(fmt.Errorf("soak group assignment lost on partition %d without replacement: %w (%s)", partition, waitErr, progress.diagnostic(partition)))
 							return
 						}
 						consumer = replacement
@@ -982,6 +1003,7 @@ func groupLoop(ctx context.Context, handle *soakGroupHandle, topic api.TopicID, 
 				report(fmt.Errorf("soak group poll partition %d: %w", partition, err))
 				return
 			}
+			progress.lastPollCompleted[partition].Store(time.Now().UnixNano())
 			partitionMetrics.pollRecords.Add(uint64(len(result.Records)))
 			if err := validateSoakDelivery(result, topic, partition, oracles[soakPartitionKey(soakStableTopic, partition)]); err != nil {
 				report(err)
@@ -996,6 +1018,7 @@ func groupLoop(ctx context.Context, handle *soakGroupHandle, topic api.TopicID, 
 				continue
 			}
 			partitionMetrics.commitOps.Add(1)
+			progress.lastCommitStarted[partition].Store(time.Now().UnixNano())
 			commitStarted := time.Now()
 			commitErr := consumer.Commit(ctx, topic, partition, result.NextOffset)
 			recordSoakLatency(&metrics.commitOps, &metrics.commitNanos, &metrics.commitBuckets, time.Since(commitStarted))
@@ -1005,7 +1028,7 @@ func groupLoop(ctx context.Context, handle *soakGroupHandle, topic api.TopicID, 
 						partitionMetrics.assignmentLost.Add(1)
 						replacement, waitErr := waitForSoakConsumerReplacement(ctx, handle, consumer)
 						if waitErr != nil {
-							report(fmt.Errorf("soak group assignment lost during commit on partition %d without replacement: %w", partition, waitErr))
+							report(fmt.Errorf("soak group assignment lost during commit on partition %d without replacement: %w (%s)", partition, waitErr, progress.diagnostic(partition)))
 							return
 						}
 						consumer = replacement
@@ -1015,6 +1038,7 @@ func groupLoop(ctx context.Context, handle *soakGroupHandle, topic api.TopicID, 
 				report(fmt.Errorf("soak group commit partition %d: %w", partition, commitErr))
 				return
 			}
+			progress.lastCommitFinished[partition].Store(time.Now().UnixNano())
 			partitionMetrics.commitRecords.Add(uint64(len(result.Records)))
 			oracle := oracles[soakPartitionKey(soakStableTopic, partition)]
 			if err := oracle.commit(result.NextOffset); err != nil {
