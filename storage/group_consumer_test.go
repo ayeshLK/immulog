@@ -418,6 +418,120 @@ func TestGroupConsumerDeadlineFencesEveryMember(t *testing.T) {
 	}
 }
 
+func TestGroupConsumerPollKeepsLeaseDuringSlowFetch(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	descriptor, err := store.CreateTopic("slow-group-fetch", 1, PartitionOptions{BatchBytes: 4096, SegmentBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partition, err := store.OpenPartition(descriptor.ID, 0, PartitionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	members := []api.ConsumerGroupMember{{Subscriptions: []api.TopicPartition{{Topic: descriptor.ID, Partition: 0}}}}
+	consumer, err := store.OpenConsumerGroup(context.Background(), "slow-group-fetch", members, api.ConsumerGroupOptions{Start: api.GroupStartEarliest, ProgressTimeout: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := consumer.cursors[topicKey{topic: descriptor.ID, partition: 0}]
+
+	partition.mu.Lock()
+	pollResult := make(chan error, 1)
+	go func() {
+		_, err := consumer.Poll(context.Background(), descriptor.ID, 0, api.FetchOptions{MaxRecords: 1, MaxBytes: 1024})
+		pollResult <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		store.mu.Lock()
+		active := consumer.members[cursor.owner].inFlight != 0
+		store.mu.Unlock()
+		if active {
+			break
+		}
+		if time.Now().After(deadline) {
+			partition.mu.Unlock()
+			t.Fatal("group poll did not begin")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(30 * time.Millisecond)
+	partition.mu.Unlock()
+
+	select {
+	case err := <-pollResult:
+		if err != nil {
+			t.Fatalf("slow group poll = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow group poll did not complete")
+	}
+	if _, err := consumer.Poll(context.Background(), descriptor.ID, 0, api.FetchOptions{MaxRecords: 1, MaxBytes: 1024}); err != nil {
+		t.Fatalf("group poll after slow fetch = %v, want nil", err)
+	}
+}
+
+func TestGroupConsumerCommitKeepsLeaseDuringSlowDurableAppend(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	descriptor, err := store.CreateTopic("slow-group-commit", 1, PartitionOptions{BatchBytes: 4096, SegmentBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partition, err := store.OpenPartition(descriptor.ID, 0, PartitionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := partition.Append(context.Background(), api.AppendRequest{Topic: descriptor.ID, Partition: 0, Value: []byte("one")}); err != nil {
+		t.Fatal(err)
+	}
+	members := []api.ConsumerGroupMember{{Subscriptions: []api.TopicPartition{{Topic: descriptor.ID, Partition: 0}}}}
+	consumer, err := store.OpenConsumerGroup(context.Background(), "slow-group-commit", members, api.ConsumerGroupOptions{Start: api.GroupStartEarliest, ProgressTimeout: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := consumer.Poll(context.Background(), descriptor.ID, 0, api.FetchOptions{MaxRecords: 1, MaxBytes: 1024}); err != nil || len(result.Records) != 1 {
+		t.Fatalf("initial group poll = (%#v, %v)", result, err)
+	}
+
+	appendOffsets := store.offsets.AppendBatch
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	store.offsetsAppend = func(batch api.RecordBatch) (uint64, error) {
+		close(entered)
+		<-release
+		return appendOffsets(batch)
+	}
+	committed := make(chan error, 1)
+	go func() { committed <- consumer.Commit(context.Background(), descriptor.ID, 0, 1) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("group commit did not reach the durable append barrier")
+	}
+	time.Sleep(30 * time.Millisecond)
+	close(release)
+	select {
+	case err := <-committed:
+		if err != nil {
+			t.Fatalf("slow group commit = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow group commit did not complete")
+	}
+	if _, err := consumer.Poll(context.Background(), descriptor.ID, 0, api.FetchOptions{MaxRecords: 1, MaxBytes: 1024}); err != nil {
+		t.Fatalf("group poll after slow commit = %v, want nil", err)
+	}
+}
+
 func TestGroupConsumerPersistsTimeoutCauseOnReplacement(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

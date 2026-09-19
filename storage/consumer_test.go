@@ -210,6 +210,117 @@ func TestConsumerProgressDeadlineFencesPollAndCommit(t *testing.T) {
 	}
 }
 
+func TestConsumerPollKeepsLeaseDuringSlowFetch(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	descriptor, err := store.CreateTopic("slow-fetch", 1, PartitionOptions{BatchBytes: 4096, SegmentBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partition, err := store.OpenPartition(descriptor.ID, 0, PartitionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := store.OpenConsumer(context.Background(), "slow-fetch", descriptor.ID, 0, api.ConsumerOptions{Start: api.GroupStartEarliest, ProgressTimeout: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	partition.mu.Lock()
+	pollResult := make(chan error, 1)
+	go func() {
+		_, err := consumer.Poll(context.Background(), api.FetchOptions{MaxRecords: 1, MaxBytes: 1024})
+		pollResult <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		store.mu.Lock()
+		active := consumer.operationActive
+		store.mu.Unlock()
+		if active {
+			break
+		}
+		if time.Now().After(deadline) {
+			partition.mu.Unlock()
+			t.Fatal("poll did not begin")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(30 * time.Millisecond)
+	partition.mu.Unlock()
+
+	select {
+	case err := <-pollResult:
+		if err != nil {
+			t.Fatalf("slow poll = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow poll did not complete")
+	}
+	if _, err := consumer.Poll(context.Background(), api.FetchOptions{MaxRecords: 1, MaxBytes: 1024}); err != nil {
+		t.Fatalf("poll after slow fetch = %v, want nil", err)
+	}
+}
+
+func TestConsumerCommitKeepsLeaseDuringSlowDurableAppend(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	descriptor, err := store.CreateTopic("slow-commit", 1, PartitionOptions{BatchBytes: 4096, SegmentBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partition, err := store.OpenPartition(descriptor.ID, 0, PartitionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := partition.Append(context.Background(), api.AppendRequest{Topic: descriptor.ID, Partition: 0, Value: []byte("one")}); err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := store.OpenConsumer(context.Background(), "slow-commit", descriptor.ID, 0, api.ConsumerOptions{Start: api.GroupStartEarliest, ProgressTimeout: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := consumer.Poll(context.Background(), api.FetchOptions{MaxRecords: 1, MaxBytes: 1024}); err != nil {
+		t.Fatal(err)
+	}
+
+	appendOffsets := store.offsets.AppendBatch
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	store.offsetsAppend = func(batch api.RecordBatch) (uint64, error) {
+		close(entered)
+		<-release
+		return appendOffsets(batch)
+	}
+	committed := make(chan error, 1)
+	go func() { committed <- consumer.Commit(context.Background(), 1) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("commit did not reach the durable append barrier")
+	}
+	time.Sleep(30 * time.Millisecond)
+	close(release)
+	select {
+	case err := <-committed:
+		if err != nil {
+			t.Fatalf("slow commit = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow commit did not complete")
+	}
+	if _, err := consumer.Poll(context.Background(), api.FetchOptions{MaxRecords: 1, MaxBytes: 1024}); err != nil {
+		t.Fatalf("poll after slow commit = %v, want nil", err)
+	}
+}
+
 func TestConsumerAssignmentReasonTracksLifecycle(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {
