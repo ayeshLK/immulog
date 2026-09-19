@@ -27,7 +27,9 @@ import (
 
 // GroupConsumer owns one atomically installed local membership snapshot. Its
 // callers supply the complete member/subscription set for every replacement;
-// earlier handles are fenced instead of being silently retokened.
+// earlier handles are fenced instead of being silently retokened. An active
+// Poll or synchronous Commit keeps a member's progress lease alive; idle
+// members eventually expire.
 type GroupConsumer struct {
 	store           *Store
 	groupID         string
@@ -44,6 +46,7 @@ type groupMember struct {
 	session       [16]byte
 	subscriptions []topicKey
 	deadline      time.Time
+	inFlight      uint32
 }
 
 type canonicalGroupMember struct {
@@ -240,7 +243,7 @@ func (s *Store) liveGroupConsumerLocked(groupID string, consumer *GroupConsumer,
 	}
 	now := time.Now()
 	for _, member := range consumer.members {
-		if !now.Before(member.deadline) {
+		if member.inFlight == 0 && !now.Before(member.deadline) {
 			return false, true
 		}
 	}
@@ -314,14 +317,16 @@ func (consumer *GroupConsumer) Poll(ctx context.Context, topic api.TopicID, part
 		return api.FetchResult{NextOffset: cursor.next}, errors.Join(api.ErrInvalidArgument, fmt.Errorf("poll wait %s must be below the progress timeout %s", options.MaxWait, consumer.progressTimeout))
 	}
 	consumer.store.mu.Lock()
-	partition, err := consumer.activeCursorLocked(cursor)
-	if err == nil {
-		consumer.members[cursor.owner].deadline = time.Now().Add(consumer.progressTimeout)
-	}
+	partition, err := consumer.beginCursorOperationLocked(cursor)
 	consumer.store.mu.Unlock()
 	if err != nil {
 		return api.FetchResult{NextOffset: cursor.next}, err
 	}
+	defer func() {
+		consumer.store.mu.Lock()
+		consumer.endCursorOperationLocked(cursor)
+		consumer.store.mu.Unlock()
+	}()
 	result, err := partition.Fetch(ctx, cursor.next, options)
 	if err != nil {
 		return result, err
@@ -368,10 +373,11 @@ func (consumer *GroupConsumer) Commit(ctx context.Context, topic api.TopicID, pa
 	defer consumer.store.releaseOffsetsAdmission()
 	consumer.store.mu.Lock()
 	defer consumer.store.mu.Unlock()
-	partition, err := consumer.activeCursorLocked(cursor)
+	partition, err := consumer.beginCursorOperationLocked(cursor)
 	if err != nil {
 		return err
 	}
+	defer consumer.endCursorOperationLocked(cursor)
 	group := consumer.store.offsetsState.groups[consumer.groupID]
 	progress := group.Progress[key]
 	current := latestNext(progress)
@@ -466,6 +472,28 @@ func (consumer *GroupConsumer) cursor(key topicKey) (*groupCursor, error) {
 	return cursor, nil
 }
 
+func (consumer *GroupConsumer) beginCursorOperationLocked(cursor *groupCursor) (*Partition, error) {
+	partition, err := consumer.activeCursorLocked(cursor)
+	if err != nil {
+		return nil, err
+	}
+	member := consumer.members[cursor.owner]
+	member.inFlight++
+	member.deadline = time.Now().Add(consumer.progressTimeout)
+	return partition, nil
+}
+
+func (consumer *GroupConsumer) endCursorOperationLocked(cursor *groupCursor) {
+	member := consumer.members[cursor.owner]
+	if member == nil || member.inFlight == 0 {
+		return
+	}
+	member.inFlight--
+	if member.inFlight == 0 && !consumer.closed && !consumer.store.closed && consumer.store.groupConsumers[consumer.groupID] == consumer {
+		member.deadline = time.Now().Add(consumer.progressTimeout)
+	}
+}
+
 func (consumer *GroupConsumer) activeCursorLocked(cursor *groupCursor) (*Partition, error) {
 	if consumer.closed || consumer.store.closed {
 		return nil, api.ErrClosed
@@ -482,7 +510,7 @@ func (consumer *GroupConsumer) activeCursorLocked(cursor *groupCursor) (*Partiti
 	}
 	now := time.Now()
 	for _, member := range consumer.members {
-		if !now.Before(member.deadline) {
+		if member.inFlight == 0 && !now.Before(member.deadline) {
 			delete(consumer.store.groupConsumers, consumer.groupID)
 			consumer.store.expiredGroups[consumer.groupID] = true
 			return nil, assignmentLost("member progress deadline expired")

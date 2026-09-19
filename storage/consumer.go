@@ -34,8 +34,9 @@ const (
 
 // Consumer owns one same-process group assignment for one topic partition. A
 // later OpenConsumer for that key durably fences this handle before activating
-// its replacement. Consumers provide at-least-once delivery, not exclusive
-// application processing.
+// its replacement. An active Poll or synchronous Commit keeps its progress
+// lease alive; an idle handle eventually expires. Consumers provide
+// at-least-once delivery, not exclusive application processing.
 type Consumer struct {
 	store           *Store
 	groupID         string
@@ -45,12 +46,13 @@ type Consumer struct {
 	fetch           api.FetchOptions
 	progressTimeout time.Duration
 
-	operation sync.Mutex
-	next      uint64
-	delivered uint64
-	deadline  time.Time
-	expired   bool
-	closed    bool
+	operation       sync.Mutex
+	next            uint64
+	delivered       uint64
+	deadline        time.Time
+	operationActive bool
+	expired         bool
+	closed          bool
 }
 
 // OpenConsumer durably creates or reassigns a local group key. Start is
@@ -215,14 +217,16 @@ func (consumer *Consumer) Poll(ctx context.Context, options api.FetchOptions) (a
 		return api.FetchResult{NextOffset: consumer.next}, errors.Join(api.ErrInvalidArgument, fmt.Errorf("poll wait %s must be below the progress timeout %s", options.MaxWait, consumer.progressTimeout))
 	}
 	consumer.store.mu.Lock()
-	partition, err := consumer.activePartitionLocked()
-	if err == nil {
-		consumer.deadline = time.Now().Add(consumer.progressTimeout)
-	}
+	partition, err := consumer.beginOperationLocked()
 	consumer.store.mu.Unlock()
 	if err != nil {
 		return api.FetchResult{NextOffset: consumer.next}, err
 	}
+	defer func() {
+		consumer.store.mu.Lock()
+		consumer.endOperationLocked()
+		consumer.store.mu.Unlock()
+	}()
 	result, err := partition.Fetch(ctx, consumer.next, options)
 	if err != nil {
 		return result, err
@@ -265,10 +269,11 @@ func (consumer *Consumer) Commit(ctx context.Context, next uint64) error {
 	defer consumer.store.releaseOffsetsAdmission()
 	consumer.store.mu.Lock()
 	defer consumer.store.mu.Unlock()
-	partition, err := consumer.activePartitionLocked()
+	partition, err := consumer.beginOperationLocked()
 	if err != nil {
 		return err
 	}
+	defer consumer.endOperationLocked()
 	group := consumer.store.offsetsState.groups[consumer.groupID]
 	progress := group.Progress[consumer.key]
 	current := latestNext(progress)
@@ -351,6 +356,23 @@ func (consumer *Consumer) Close() error {
 	return nil
 }
 
+func (consumer *Consumer) beginOperationLocked() (*Partition, error) {
+	partition, err := consumer.activePartitionLocked()
+	if err != nil {
+		return nil, err
+	}
+	consumer.operationActive = true
+	consumer.deadline = time.Now().Add(consumer.progressTimeout)
+	return partition, nil
+}
+
+func (consumer *Consumer) endOperationLocked() {
+	consumer.operationActive = false
+	if !consumer.closed && !consumer.store.closed && consumer.store.consumers[consumerMapKey(consumer.groupID, consumer.key)] == consumer {
+		consumer.deadline = time.Now().Add(consumer.progressTimeout)
+	}
+}
+
 func (consumer *Consumer) activePartitionLocked() (*Partition, error) {
 	if consumer.closed || consumer.store.closed {
 		return nil, api.ErrClosed
@@ -358,7 +380,7 @@ func (consumer *Consumer) activePartitionLocked() (*Partition, error) {
 	if consumer.store.closing.Load() {
 		return nil, api.ErrClosing
 	}
-	if consumer.expired || (!consumer.deadline.IsZero() && !time.Now().Before(consumer.deadline)) {
+	if consumer.expired || (!consumer.operationActive && !consumer.deadline.IsZero() && !time.Now().Before(consumer.deadline)) {
 		consumer.expired = true
 		consumer.store.expiredGroups[consumer.groupID] = true
 		delete(consumer.store.consumers, consumerMapKey(consumer.groupID, consumer.key))
