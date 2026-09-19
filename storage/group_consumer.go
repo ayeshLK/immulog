@@ -478,25 +478,38 @@ func (consumer *GroupConsumer) activeCursorLocked(cursor *groupCursor) (*Partiti
 		return nil, api.ErrGroupUnavailable
 	}
 	if consumer.store.groupConsumers[consumer.groupID] != consumer {
-		return nil, api.ErrAssignmentLost
+		return nil, assignmentLost("live consumer was replaced")
 	}
 	now := time.Now()
 	for _, member := range consumer.members {
 		if !now.Before(member.deadline) {
 			delete(consumer.store.groupConsumers, consumer.groupID)
 			consumer.store.expiredGroups[consumer.groupID] = true
-			return nil, api.ErrAssignmentLost
+			return nil, assignmentLost("member progress deadline expired")
 		}
 	}
 	group := consumer.store.offsetsState.groups[consumer.groupID]
-	if group == nil || group.Generation != consumer.generation || group.AssignmentInstance != [16]byte(consumer.store.storeID) || group.AssignmentOwner[cursor.key] != cursor.owner {
-		return nil, api.ErrAssignmentLost
+	if group == nil {
+		return nil, assignmentLost("durable group assignment is missing")
+	}
+	if group.Generation != consumer.generation {
+		return nil, assignmentLost("durable group generation changed")
+	}
+	if group.AssignmentInstance != [16]byte(consumer.store.storeID) {
+		return nil, assignmentLost("durable assignment belongs to another store instance")
+	}
+	if group.AssignmentOwner[cursor.key] != cursor.owner {
+		return nil, assignmentLost("cursor assignment owner changed")
 	}
 	partition := consumer.store.partitions[partitionKey{topic: cursor.key.topic, partition: cursor.key.partition}]
 	if partition == nil {
-		return nil, api.ErrAssignmentLost
+		return nil, assignmentLost("assigned partition is unavailable")
 	}
 	return partition, nil
+}
+
+func assignmentLost(reason string) error {
+	return fmt.Errorf("%w: %s", api.ErrAssignmentLost, reason)
 }
 
 func normalizeConsumerGroupOptions(options *api.ConsumerGroupOptions) error {
