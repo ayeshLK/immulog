@@ -10,6 +10,7 @@ Run the mixed workload soak with a dedicated data directory and captured evidenc
 Options:
   -d, --duration VALUE          Measurement duration (default: 4h)
       --warmup VALUE            Optional warmup duration excluded from metrics (default: 0)
+      --runs VALUE              Independent evidence runs (default: 1)
   -p, --profile NAME            Workload profile: mixed or sustained (default: mixed)
   -s, --seed VALUE              Deterministic seed (default: 0x5eed5eed)
   -r, --reopen-interval VALUE   Store reopen interval (default: 10m)
@@ -42,11 +43,13 @@ cd "$repo_root"
 
 run_root="$HOME/immulog-soak-$(date +%Y%m%d-%H%M%S)"
 data_dir=''
+data_dir_explicit=0
 log_file=''
 metrics_file=''
 environment_file=''
 duration=4h
 warmup=0s
+runs=1
 profile=mixed
 seed=0x5eed5eed
 reopen_interval=10m
@@ -82,6 +85,12 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--warmup=*) warmup=${1#*=}; shift ;;
+	--runs)
+		require_value "$@"
+		runs=$2
+		shift 2
+		;;
+	--runs=*) runs=${1#*=}; shift ;;
 	--duration=*) duration=${1#*=}; shift ;;
 	-p|--profile)
 		require_value "$@"
@@ -165,9 +174,10 @@ while [[ $# -gt 0 ]]; do
 	-D|--data-dir)
 		require_value "$@"
 		data_dir=$2
+		data_dir_explicit=1
 		shift 2
 		;;
-	--data-dir=*) data_dir=${1#*=}; shift ;;
+	--data-dir=*) data_dir=${1#*=}; data_dir_explicit=1; shift ;;
 	-L|--log-file)
 		require_value "$@"
 		log_file=$2
@@ -220,8 +230,56 @@ fi
 if [[ -z "$environment_file" ]]; then
 	environment_file="$run_root/environment.txt"
 fi
+if ! [[ "$runs" =~ ^[1-9][0-9]*$ ]]; then
+	echo "runs must be a positive integer" >&2
+	exit 2
+fi
+if [[ "$runs" -gt 1 && "$data_dir_explicit" -eq 1 ]]; then
+	echo "--data-dir cannot be combined with --runs; use --run-dir for isolated runs" >&2
+	exit 2
+fi
+
+child_args() {
+	local child_dir=$1
+	child_args=(--run-dir "$child_dir" --profile "$profile" --duration "$duration" --warmup "$warmup" --runs 1 --timeout "$timeout" --seed "$seed" --reopen-interval "$reopen_interval" --append-interval "$append_interval" --churn-interval "$churn_interval" --sample-interval "$sample_interval" --sample-limit "$sample_limit" --minimum-free-bytes "$minimum_free_bytes" --minimum-open-files "$minimum_open_files")
+	if [[ -n "$producer_rate" ]]; then
+		child_args+=(--producer-rate "$producer_rate")
+	fi
+	if [[ -n "$rate_sweep" ]]; then
+		child_args+=(--rate-sweep "$rate_sweep")
+	fi
+	if (( analyze )); then
+		child_args+=(--analyze)
+	fi
+}
+
+if [[ "$runs" -gt 1 ]]; then
+	mkdir -p "$run_root"
+	runs_summary="$run_root/runs.tsv"
+	printf 'run\tstatus\tdirectory\n' > "$runs_summary"
+	runs_status=0
+	for ((run=1; run<=runs; run++)); do
+		child_args "$run_root/run-$run"
+		if "$0" "${child_args[@]}"; then
+			run_status=0
+		else
+			run_status=$?
+		fi
+		printf '%d\t%d\t%s\n' "$run" "$run_status" "$run_root/run-$run" >> "$runs_summary"
+		if (( run_status != 0 )); then
+			runs_status=$run_status
+			break
+		fi
+	done
+	printf 'Run summary: %s\n' "$runs_summary"
+	exit "$runs_status"
+fi
 
 if [[ -n "$rate_sweep" ]]; then
+	mkdir -p "$run_root"
+	sweep_summary="$run_root/rates.tsv"
+	printf 'rate\tstatus\tdirectory\n' > "$sweep_summary"
+	sweep_status=0
 	IFS=',' read -r -a sweep_rates <<< "$rate_sweep"
 	for sweep_rate in "${sweep_rates[@]}"; do
 		if ! [[ "$sweep_rate" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
@@ -229,13 +287,23 @@ if [[ -n "$rate_sweep" ]]; then
 			exit 2
 		fi
 		rate_dir="$run_root/rate-${sweep_rate//./_}"
-		args=(--run-dir "$rate_dir" --profile "$profile" --duration "$duration" --warmup "$warmup" --timeout "$timeout" --seed "$seed" --reopen-interval "$reopen_interval" --append-interval "$append_interval" --churn-interval "$churn_interval" --sample-interval "$sample_interval" --sample-limit "$sample_limit" --producer-rate "$sweep_rate" --minimum-free-bytes "$minimum_free_bytes" --minimum-open-files "$minimum_open_files")
+		args=(--run-dir "$rate_dir" --profile "$profile" --duration "$duration" --warmup "$warmup" --runs 1 --timeout "$timeout" --seed "$seed" --reopen-interval "$reopen_interval" --append-interval "$append_interval" --churn-interval "$churn_interval" --sample-interval "$sample_interval" --sample-limit "$sample_limit" --producer-rate "$sweep_rate" --minimum-free-bytes "$minimum_free_bytes" --minimum-open-files "$minimum_open_files")
 		if (( analyze )); then
 			args+=(--analyze)
 		fi
-		"$0" "${args[@]}"
+		if "$0" "${args[@]}"; then
+			rate_status=0
+		else
+			rate_status=$?
+		fi
+		printf '%s\t%d\t%s\n' "$sweep_rate" "$rate_status" "$rate_dir" >> "$sweep_summary"
+		if (( rate_status != 0 )); then
+			sweep_status=$rate_status
+			break
+		fi
 	done
-	exit 0
+	printf 'Rate summary: %s\n' "$sweep_summary"
+	exit "$sweep_status"
 fi
 
 if [[ -z "$data_dir" || "$data_dir" == "/" ]]; then
@@ -262,7 +330,6 @@ if ! [[ "$sample_limit" =~ ^[1-9][0-9]*$ ]]; then
 	echo "sample limit must be a positive integer" >&2
 	exit 2
 fi
-
 parse_duration_seconds() {
 	local remaining=$1 total=0 number unit factor
 	while [[ -n "$remaining" ]]; do
@@ -342,6 +409,7 @@ fi
 	printf 'branch=%s\n' "$(git branch --show-current)"
 	printf 'duration=%s\n' "$duration"
 	printf 'warmup=%s\n' "$warmup"
+	printf 'runs=%s\n' "$runs"
 	printf 'profile=%s\n' "$profile"
 	printf 'duration_seconds=%s\n' "$duration_seconds"
 	printf 'seed=%s\n' "$seed"

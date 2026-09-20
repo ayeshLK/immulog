@@ -80,7 +80,11 @@ jobs:
       - name: Run microbenchmarks
         shell: bash
         run: |
-          go test ./perf/benchmarks -run '^$' -bench . -benchmem -benchtime="$BENCHTIME" -count="$BENCHMARK_COUNT" | tee perf-results/benchmarks.txt
+          perf/benchmarks/run.sh \
+            --run-dir "$GITHUB_WORKSPACE/perf-results/microbenchmarks" \
+            --profile standard \
+            --benchtime "$BENCHTIME" \
+            --count "$BENCHMARK_COUNT"
       - name: Run optional soak smoke
         if: ${{ inputs.run_soak_smoke }}
         shell: bash
