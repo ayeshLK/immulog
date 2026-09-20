@@ -31,6 +31,16 @@ on:
         required: true
         default: 20s
         type: string
+      soak_producer_rate:
+        description: Optional aggregate sustained producer rate in records/s
+        required: true
+        default: "0"
+        type: string
+      soak_analyze:
+        description: Analyze structured soak metrics
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -79,9 +89,11 @@ jobs:
             --run-dir "$GITHUB_WORKSPACE/perf-results/soak" \
             --profile "${{ inputs.soak_profile }}" \
             --duration "${{ inputs.soak_duration }}" \
+            --producer-rate "${{ inputs.soak_producer_rate }}" \
             --timeout 90s \
             --minimum-free-bytes 0 \
-            --minimum-open-files 0
+            --minimum-open-files 0 \
+            ${{ inputs.soak_analyze && '--analyze' || '' }}
       - name: Upload raw evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
