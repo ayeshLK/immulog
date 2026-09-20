@@ -40,17 +40,17 @@ go test ./storage -run '^$' -fuzz=FuzzDecodeSegmentHeader -fuzztime=60m -paralle
 go test ./storage -run '^$' -fuzz=FuzzPreflightSystemLogSegment -fuzztime=60m -parallel=1
 ```
 
-Performance evidence is collected by the manual workflow or with the
-repeated-sample commands in [BENCHMARKS.md](BENCHMARKS.md). For a quick local
-check:
+Performance evidence is collected by the manual workflow or with
+`perf/benchmarks/run.sh`. Use the profiles documented in
+[BENCHMARKS.md](BENCHMARKS.md); for a quick local check:
 
 ```sh
-go test ./perf/benchmarks -run '^$' -bench . -benchmem -benchtime=1s -count=1
+perf/benchmarks/run.sh --profile smoke
 ```
 
-Record the host, filesystem, payload, batching, concurrency, and sample
-parameters with any result; do not compare the one-record durability case with
-batched throughput.
+The runner captures the host, filesystem, commit, workload, and sample
+parameters with each result. Do not compare the one-record durability case
+with batched throughput.
 
 The mixed workload soak is opt-in and must use a dedicated directory. For
 controlled sustained evidence, set an aggregate producer rate and retain the

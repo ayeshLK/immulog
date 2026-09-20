@@ -31,12 +31,15 @@ Long-running or opt-in checks:
 go test ./storage -run '^$' -fuzz=FuzzDecodeBatch -fuzztime=60m -parallel=1
 go test ./storage -run '^$' -fuzz=FuzzDecodeSegmentHeader -fuzztime=60m -parallel=1
 go test ./storage -run '^$' -fuzz=FuzzPreflightSystemLogSegment -fuzztime=60m -parallel=1
-go test ./perf/benchmarks -run '^$' -bench .
+perf/benchmarks/run.sh --profile smoke
 perf/soak/run.sh --profile mixed --duration 20s --timeout 90s --minimum-free-bytes 0 --minimum-open-files 0
 ```
 
 There is no separate build script; `go test ./...` compiles all packages.
-The soak test is disabled unless `IMMULOG_SOAK=1`; use `IMMULOG_SOAK_DIR`
+`perf/benchmarks/run.sh` owns reproducible microbenchmark profiles and captures
+raw output and host metadata; use `smoke` for quick checks, `standard` for
+comparisons, and `qualification` for release evidence. The soak test is
+disabled unless `IMMULOG_SOAK=1`; use `IMMULOG_SOAK_DIR`
 for a dedicated persistent directory. `IMMULOG_SOAK_DURATION`, `IMMULOG_SOAK_WARMUP`,
 `IMMULOG_SOAK_REOPEN_INTERVAL`, `IMMULOG_SOAK_APPEND_INTERVAL`,
 `IMMULOG_SOAK_PRODUCER_RATE`, `IMMULOG_SOAK_SAMPLE_INTERVAL`,
@@ -46,7 +49,9 @@ monotonic aggregate records-per-second schedule; zero preserves unlimited
 producer mode. The runner's `--churn-interval 0` setting disables deliberate
 consumer membership replacement. Prefer `perf/soak/run.sh` for
 long runs because it records environment, resource guardrails, logs,
-checkpoints, and `metrics.json`.
+checkpoints, and `metrics.json`. Use `--runs` for isolated repeated evidence
+runs and `--rate-sweep` for isolated offered-rate runs; do not wrap the runner
+in a user-side shell loop.
 
 ### Performance and soak evidence
 

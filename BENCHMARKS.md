@@ -47,14 +47,37 @@ append-to-consumer timing for acknowledged records.
 
 ## Reproduce locally
 
-Run the repository microbenchmarks with repeated samples:
+Use the benchmark runner rather than writing a shell loop. It selects sensible
+Go benchmark settings, repeats samples, captures the tested commit and host
+metadata, and preserves raw output under a dedicated run directory:
 
 ```sh
-go test ./perf/benchmarks -run '^$' -bench . -benchmem -benchtime=5s -count=5
-go test ./perf/benchmarks -run '^$' -bench . -benchmem -cpu 1,2,4,8 -count=3
+perf/benchmarks/run.sh --profile smoke
+perf/benchmarks/run.sh --profile standard
+perf/benchmarks/run.sh --profile qualification
 ```
 
-Use focused runs while iterating:
+The profiles are intentionally explicit:
+
+| Profile | Use | Duration | Samples | Independent runs |
+|---|---|---:|---:|---:|
+| `smoke` | Fast local validation | 1s | 3 | 1 |
+| `standard` | Development comparison | 5s | 5 | 1 |
+| `qualification` | Release-quality evidence | 10s | 10 | 3 |
+
+`qualification` requires a clean worktree unless `--allow-dirty` is supplied.
+Use `--suite append` or `--suite fetch` to narrow the workload, and use
+`--cpu 1,2,4,8` when comparing concurrency scaling:
+
+```sh
+perf/benchmarks/run.sh --profile standard --suite append
+perf/benchmarks/run.sh --profile standard --suite fetch --cpu 1,2,4,8
+```
+
+The runner's `summary.tsv`, `configuration.txt`, `environment.txt`,
+`command.txt`, and `run-*.txt` files are the evidence artifact. A nonzero
+benchmark or process run status causes the runner to fail. Use the direct Go
+command only when developing a benchmark or debugging the runner:
 
 ```sh
 go test ./perf/benchmarks -run '^$' -bench 'BenchmarkIngressAppendParallel|BenchmarkDirectAppendBatch' -benchmem -benchtime=1s -count=1
@@ -125,6 +148,97 @@ and the process open-file limit, and writes a machine-readable schema-v2
 `metrics.json` sidecar containing phase durations, counters, bounded samples,
 resource observations, aggregate and per-partition
 delivery records/bytes/rates and lag, oracle results, and latency bucket data.
+`--runs 3` automatically executes isolated runs and writes `runs.tsv`; it
+replaces a user-side shell loop. Rate sweeps similarly write `rates.tsv`.
+
+Recommended soak evidence sets:
+
+| Set | Configuration | Purpose |
+|---|---|---|
+| Smoke | `mixed`, 20s, resource preflights disabled | Fast correctness check |
+| Sustained sweep | `sustained`, 5m warmup, 30m per rate, `--churn-interval 0`, `--rate-sweep 500,1000,1500` | Find a stable offered-rate range |
+| Qualification | `sustained`, 30m warmup, 4h, selected `--producer-rate`, `--churn-interval 0`, `--runs 3` | Repeatable capacity and liveness evidence |
+
+Use the sweep to select a rate before starting qualification. Keep automatic
+resource preflights enabled for sustained and qualification runs; only the
+short smoke intentionally disables them.
+
+### Production-grade qualification setups
+
+Run qualification on a dedicated Linux host or reserved storage volume with
+no competing workload. Start from a clean, recorded commit, use a dedicated
+data directory, keep the runner's automatic free-space and open-file
+preflights enabled, and preserve the complete run directory. Do not point the
+soak at an application data directory.
+
+Capture the host limits before starting:
+
+```sh
+git status --short
+git rev-parse HEAD
+ulimit -Sn
+ulimit -Hn
+df -T /mnt/immulog-benchmarks
+```
+
+First identify a sustainable offered rate. The following is a discovery sweep,
+not final capacity evidence:
+
+```sh
+perf/soak/run.sh \
+  --run-dir /mnt/immulog-benchmarks/rate-sweep \
+  --profile sustained \
+  --warmup 5m \
+  --duration 30m \
+  --timeout 40m \
+  --seed 0x5eed5eed \
+  --rate-sweep 500,1000,1500 \
+  --churn-interval 0 \
+  --analyze
+```
+
+Choose a rate whose backlog slope is not positive and whose delivery and
+commit lag remain bounded. Then run three isolated qualification runs without
+a user-side loop:
+
+```sh
+perf/soak/run.sh \
+  --run-dir /mnt/immulog-benchmarks/qualification \
+  --profile sustained \
+  --warmup 30m \
+  --duration 4h \
+  --timeout 4h30m \
+  --seed 0x5eed5eed \
+  --producer-rate 1000 \
+  --churn-interval 0 \
+  --runs 3 \
+  --analyze
+```
+
+Replace `1000` with the rate selected by the sweep. For resilience evidence,
+run a separate mixed-profile qualification; do not interpret its throughput
+as sustained capacity:
+
+```sh
+perf/soak/run.sh \
+  --run-dir /mnt/immulog-benchmarks/resilience \
+  --profile mixed \
+  --warmup 5m \
+  --duration 4h \
+  --timeout 4h30m \
+  --seed 0x5eed5eed \
+  --producer-rate 500 \
+  --runs 3 \
+  --analyze
+```
+
+Accept a sustained qualification only when every run exits successfully and
+has no assignment loss, dropped samples, failed oracle verification, positive
+backlog slope, or unbounded delivery/commit lag. Also confirm that free space,
+open files, RSS, and goroutines retain operational headroom. Compare runs only
+when commit, seed, Go version, host, filesystem, payload, and workload settings
+match. Keep `metrics.json`, `summary.md`, `runs.tsv`, logs, checkpoints, and
+environment captures with the evidence record.
 
 ### Open-file limits for long runs
 
