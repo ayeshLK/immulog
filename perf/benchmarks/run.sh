@@ -22,12 +22,17 @@ Options:
       --cpu VALUE           Go benchmark CPU list (default: 1)
       --timeout VALUE       Go test timeout (profile default varies)
       --run-dir PATH        Evidence directory (default: $HOME/immulog-benchmark-TIMESTAMP)
+      --analyze             Write summary.md and summary.json from captured output
+      --analyze-only        Analyze an existing --run-dir without running benchmarks
+      --append-to PATH      Append the Markdown analysis to a document explicitly
       --allow-dirty         Permit a dirty worktree (qualification rejects it by default)
       --no-benchmem         Do not include allocation measurements
   -h, --help, help          Show this help
 
 Each run writes raw benchmark output, a command file, an environment capture,
 a summary, and the effective configuration under the evidence directory.
+`--analyze` adds aggregate Markdown and JSON reports; `--append-to` is an
+explicit opt-in for recording the Markdown report in a document.
 EOF
 }
 
@@ -45,6 +50,9 @@ timeout_override=''
 run_root="$HOME/immulog-benchmark-$(date +%Y%m%d-%H%M%S)"
 allow_dirty=0
 benchmem=1
+analyze=0
+analyze_only=0
+append_to=''
 
 require_value() {
 	if [[ $# -lt 2 || -z "$2" ]]; then
@@ -104,6 +112,15 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--timeout=*) timeout_override=${1#*=}; shift ;;
+	--analyze) analyze=1; shift ;;
+	--analyze-only) analyze=1; analyze_only=1; shift ;;
+	--append-to)
+		require_value "$@"
+		append_to=$2
+		analyze=1
+		shift 2
+		;;
+	--append-to=*) append_to=${1#*=}; analyze=1; shift ;;
 	-R|--run-dir)
 		require_value "$@"
 		run_root=$2
@@ -184,11 +201,16 @@ if ! [[ "$runs" =~ ^[1-9][0-9]*$ ]]; then
 	echo "runs must be a positive integer" >&2
 	exit 2
 fi
-if [[ -e "$run_root" ]] && [[ -n "$(find "$run_root" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+if (( analyze_only )); then
+	if [[ ! -d "$run_root" ]]; then
+		echo "analyze-only run directory does not exist: $run_root" >&2
+		exit 2
+	fi
+elif [[ -e "$run_root" ]] && [[ -n "$(find "$run_root" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
 	echo "run directory is not empty: $run_root" >&2
 	exit 2
 fi
-if (( allow_dirty == 0 )) && [[ "$profile" == qualification ]] && [[ -n "$(git status --porcelain)" ]]; then
+if (( allow_dirty == 0 && analyze_only == 0 )) && [[ "$profile" == qualification ]] && [[ -n "$(git status --porcelain)" ]]; then
 	echo "qualification requires a clean worktree; use --allow-dirty to override" >&2
 	exit 2
 fi
@@ -200,6 +222,34 @@ environment_file="$run_root/environment.txt"
 configuration_file="$run_root/configuration.txt"
 summary_file="$run_root/summary.tsv"
 
+run_analysis() {
+	local input
+	local inputs=("$run_root"/run-*.txt)
+	if [[ ! -f "${inputs[0]}" ]]; then
+		echo "no benchmark output files found in $run_root" >&2
+		return 1
+	fi
+	local markdown_args=(go run ./perf/benchmarks/analyze --format markdown --output "$run_root/summary.md")
+	local json_args=(go run ./perf/benchmarks/analyze --format json --output "$run_root/summary.json")
+	for input in "${inputs[@]}"; do
+		markdown_args+=(--input "$input")
+		json_args+=(--input "$input")
+	done
+	if [[ -n "$append_to" ]]; then
+		markdown_args+=(--append-to "$append_to")
+	fi
+	"${json_args[@]}" && "${markdown_args[@]}"
+}
+
+if (( analyze_only )); then
+	if ! run_analysis; then
+		exit 1
+	fi
+	printf 'Artifacts: %s\n' "$run_root"
+	printf 'Summary:   %s\n' "$run_root/summary.md"
+	exit 0
+fi
+
 cat > "$configuration_file" <<EOF
 profile=$profile
 suite=$suite
@@ -210,6 +260,8 @@ runs=$runs
 cpu=$cpu
 timeout=$timeout
 benchmem=$benchmem
+analyze=$analyze
+append_to=$append_to
 allow_dirty=$allow_dirty
 commit=$(git rev-parse HEAD)
 EOF
@@ -262,6 +314,15 @@ for ((run=1; run<=runs; run++)); do
 	fi
 done
 
+if (( status == 0 && analyze )); then
+	if ! run_analysis; then
+		status=1
+	fi
+fi
+
 printf '\nArtifacts: %s\n' "$run_root"
 printf 'Summary:   %s\n' "$summary_file"
+if (( analyze )); then
+	printf 'Analysis:   %s\n' "$run_root/summary.md"
+fi
 exit "$status"
