@@ -52,7 +52,20 @@ Record the host, filesystem, payload, batching, concurrency, and sample
 parameters with any result; do not compare the one-record durability case with
 batched throughput.
 
-The mixed workload soak is opt-in and must use a dedicated directory:
+The mixed workload soak is opt-in and must use a dedicated directory. For
+controlled sustained evidence, set an aggregate producer rate and retain the
+structured report:
+
+```sh
+perf/soak/run.sh \
+  --profile sustained --duration 20s --timeout 90s \
+  --producer-rate 500 --analyze \
+  --minimum-free-bytes 0 --minimum-open-files 0
+```
+
+Use `go run ./perf/analyze --input metrics.json --format markdown` to inspect
+measurement-only rates and sampled backlog. Use the direct command below when
+exercising the workload without the runner:
 
 ```sh
 IMMULOG_SOAK=1 IMMULOG_SOAK_DURATION=20s \

@@ -37,11 +37,14 @@ perf/soak/run.sh --profile mixed --duration 20s --timeout 90s --minimum-free-byt
 
 There is no separate build script; `go test ./...` compiles all packages.
 The soak test is disabled unless `IMMULOG_SOAK=1`; use `IMMULOG_SOAK_DIR`
-for a dedicated persistent directory. `IMMULOG_SOAK_DURATION`,
+for a dedicated persistent directory. `IMMULOG_SOAK_DURATION`, `IMMULOG_SOAK_WARMUP`,
 `IMMULOG_SOAK_REOPEN_INTERVAL`, `IMMULOG_SOAK_APPEND_INTERVAL`,
-`IMMULOG_SOAK_CHURN_INTERVAL`, and `IMMULOG_SOAK_SEED` control resumable
-runs. The runner's `--churn-interval 0` setting disables deliberate consumer
-membership replacement. Prefer `perf/soak/run.sh` for
+`IMMULOG_SOAK_PRODUCER_RATE`, `IMMULOG_SOAK_SAMPLE_INTERVAL`,
+`IMMULOG_SOAK_SAMPLE_LIMIT`, `IMMULOG_SOAK_CHURN_INTERVAL`, and
+`IMMULOG_SOAK_SEED` control resumable runs. A nonzero producer rate applies a
+monotonic aggregate records-per-second schedule; zero preserves unlimited
+producer mode. The runner's `--churn-interval 0` setting disables deliberate
+consumer membership replacement. Prefer `perf/soak/run.sh` for
 long runs because it records environment, resource guardrails, logs,
 checkpoints, and `metrics.json`.
 
@@ -64,14 +67,20 @@ when delivery and commit lag remain bounded over time.
 Soak evidence must use a dedicated data directory and preserve the run
 artifacts. `metrics.json` includes outcome counters, oracle results, lag,
 RSS/heap/goroutine/FD observations, process I/O and CPU ticks, latency
-histograms, and aggregate/per-partition delivered payload bytes and rates.
-Ingress `acknowledged_bytes` and consumer `delivered_payload_bytes` count
-record `Value` bytes only; keys and on-disk framing are excluded. Long-run
-p50/p95/p99 values are bucket upper bounds; a value of
-`0` denotes the open-ended final `>=1s` bucket, not zero latency. Process I/O
+histograms, aggregate/per-partition delivered payload bytes and rates, and
+bounded periodic backlog/resource samples. Schema version 2 records optional warmup duration, separates measurement
+duration from total cleanup time, and records measure, drain,
+verify, and cleanup phases. Ingress `acknowledged_bytes` and consumer
+`delivered_payload_bytes` count record `Value` bytes only; keys and on-disk
+framing are excluded. Long-run p50/p90/p95/p99/p999 values are bucket upper
+bounds; a `0` in legacy latency fields denotes the open-ended final bucket,
+not zero latency. Process I/O
 is cumulative `/proc` data and CPU values are Linux process clock ticks, not
-device-wide utilization. Mixed-profile results with substantial lag should be
-reported as stress/correctness evidence, not sustained-throughput evidence.
+device-wide utilization. Use `go run ./perf/analyze --input metrics.json`
+to calculate measurement-only rates and sampled backlog trends. Mixed-profile
+results with substantial lag should be reported as stress/correctness evidence,
+not sustained-throughput evidence; sustained evidence with a positive backlog
+slope is not a stable capacity result.
 
 For reproducibility, compare runs using the same commit, seed, profile,
 duration, payload/workload configuration, Go version, and filesystem. The

@@ -49,7 +49,10 @@ const (
 	soakDefaultChurn       = 750 * time.Millisecond
 	soakCheckpointName     = ".immulog-soak-checkpoint.json"
 	soakProducerCount      = 2
-	soakLatencyBucketCount = 8
+	soakProducerWorkers    = soakPartitionCount * soakProducerCount * 2
+	soakLatencyBucketCount = 12
+	soakDefaultSampleEvery = 250 * time.Millisecond
+	soakDefaultSampleLimit = 100_000
 )
 
 type soakCheckpoint struct {
@@ -125,6 +128,42 @@ type soakPartitionMetrics struct {
 	maxCommitLag     atomic.Uint64
 }
 
+type soakSamplePartition struct {
+	DurableEnd   uint64 `json:"durable_end"`
+	NextDelivery uint64 `json:"next_delivery"`
+	Committed    uint64 `json:"committed"`
+	DeliveryLag  uint64 `json:"delivery_lag"`
+	CommitLag    uint64 `json:"commit_lag"`
+}
+
+type soakResourceSample struct {
+	Goroutines  uint64 `json:"goroutines"`
+	OpenFiles   uint64 `json:"open_files"`
+	HeapBytes   uint64 `json:"heap_bytes"`
+	RSSBytes    uint64 `json:"rss_bytes"`
+	GCCycles    uint64 `json:"gc_cycles"`
+	ReadBytes   uint64 `json:"read_bytes"`
+	WriteBytes  uint64 `json:"write_bytes"`
+	UserTicks   uint64 `json:"user_ticks"`
+	SystemTicks uint64 `json:"system_ticks"`
+}
+
+type soakSample struct {
+	ElapsedNanos uint64                         `json:"elapsed_nanos"`
+	Phase        string                         `json:"phase"`
+	Offered      uint64                         `json:"offered"`
+	Acknowledged uint64                         `json:"acknowledged"`
+	Delivered    uint64                         `json:"delivered"`
+	Committed    uint64                         `json:"committed"`
+	Partitions   map[string]soakSamplePartition `json:"partitions"`
+	Resources    soakResourceSample             `json:"resources"`
+}
+
+type soakPhaseReport struct {
+	Name          string `json:"name"`
+	DurationNanos uint64 `json:"duration_nanos"`
+}
+
 type soakConsumerProgress struct {
 	lastPollStarted    [soakPartitionCount]atomic.Int64
 	lastPollCompleted  [soakPartitionCount]atomic.Int64
@@ -133,7 +172,23 @@ type soakConsumerProgress struct {
 }
 
 type soakMetrics struct {
+	stableTopic            api.TopicID
+	stableOffered          atomic.Uint64
+	stableAcknowledged     atomic.Uint64
+	warmupNanos            uint64
 	partitions             [soakPartitionCount]soakPartitionMetrics
+	measurementStarted     atomic.Int64
+	measurementFinished    atomic.Int64
+	measurementAccumulated atomic.Int64
+	sampleIntervalNanos    int64
+	sampleLimit            uint64
+	sampleMu               sync.Mutex
+	samples                []soakSample
+	samplesDropped         uint64
+	phaseMu                sync.Mutex
+	phaseDurations         map[string]time.Duration
+	schedulerLate          atomic.Uint64
+	maxSchedulerLateness   atomic.Uint64
 	offered                atomic.Uint64
 	acknowledged           atomic.Uint64
 	unknown                atomic.Uint64
@@ -196,6 +251,10 @@ func TestMixedWorkloadSoak(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	warmup, err := soakWarmup()
+	if err != nil {
+		t.Fatal(err)
+	}
 	profile, err := soakProfile()
 	if err != nil {
 		t.Fatal(err)
@@ -209,6 +268,18 @@ func TestMixedWorkloadSoak(t *testing.T) {
 		t.Fatal(err)
 	}
 	churnInterval, err := soakChurnInterval()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sampleInterval, err := soakSampleInterval()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sampleLimit, err := soakSampleLimit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	producerRate, err := soakProducerRate()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +319,9 @@ func TestMixedWorkloadSoak(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	metrics := &soakMetrics{}
+	metrics := newSoakMetrics(sampleInterval, sampleLimit)
+	metrics.stableTopic = fixture.stable.ID
+	metrics.warmupNanos = uint64(warmup)
 	var sequenceCounter atomic.Uint64
 	oracles, err := newSoakOracles(fixture, checkpoint, seed, checkpoint.Run)
 	if err != nil {
@@ -258,16 +331,42 @@ func TestMixedWorkloadSoak(t *testing.T) {
 	for _, oracle := range oracles {
 		oracle.metrics = metrics
 	}
+	if warmup > 0 {
+		warmupMetrics := metrics
+		warmupMetrics.startMeasurement(time.Now())
+		warmupContext, warmupCancel := context.WithTimeout(context.Background(), warmup)
+		warmupErr := runSoakCycle(warmupContext, store, fixture, oracles, warmupMetrics, checkpoint.Run, seed, &sequenceCounter, appendInterval, producerRate, churnInterval, reopenInterval, overloadPeriod, overloadWindow, stressCancellation)
+		warmupCancel()
+		if warmupErr != nil {
+			t.Fatal(warmupErr)
+		}
+		store, fixture, err = openSoakStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		metrics = newSoakMetrics(sampleInterval, sampleLimit)
+		metrics.stableTopic = fixture.stable.ID
+		metrics.warmupNanos = uint64(warmup)
+		oracles, err = newSoakOracles(fixture, checkpoint, seed, checkpoint.Run)
+		if err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+		for _, oracle := range oracles {
+			oracle.metrics = metrics
+		}
+	}
 	if err := writeSoakCheckpoint(dir, checkpoint); err != nil {
 		_ = store.Close()
 		t.Fatal(err)
 	}
 
 	started := time.Now()
+	metrics.startMeasurement(started)
 	soakContext, cancel := context.WithTimeout(context.Background(), duration)
 	defer cancel()
 	for {
-		if err := runSoakCycle(soakContext, store, fixture, oracles, metrics, checkpoint.Run, seed, &sequenceCounter, appendInterval, churnInterval, reopenInterval, overloadPeriod, overloadWindow, stressCancellation); err != nil {
+		if err := runSoakCycle(soakContext, store, fixture, oracles, metrics, checkpoint.Run, seed, &sequenceCounter, appendInterval, producerRate, churnInterval, reopenInterval, overloadPeriod, overloadWindow, stressCancellation); err != nil {
 			t.Fatal(err)
 		}
 		for key, oracle := range oracles {
@@ -288,6 +387,7 @@ func TestMixedWorkloadSoak(t *testing.T) {
 		}
 	}
 
+	metrics.finishMeasurement(time.Now())
 	for key, oracle := range oracles {
 		checkpoint.Partitions[key] = soakCheckpointPosition{Next: oracle.nextOffset()}
 	}
@@ -310,13 +410,15 @@ func TestMixedWorkloadSoak(t *testing.T) {
 }
 
 type soakLatencyReport struct {
-	Operations     uint64   `json:"operations"`
-	TotalNanos     uint64   `json:"total_nanos"`
-	AverageNanos   uint64   `json:"average_nanos"`
-	P50BucketNanos uint64   `json:"p50_bucket_nanos"`
-	P95BucketNanos uint64   `json:"p95_bucket_nanos"`
-	P99BucketNanos uint64   `json:"p99_bucket_nanos"`
-	Buckets        []uint64 `json:"buckets"`
+	Operations      uint64   `json:"operations"`
+	TotalNanos      uint64   `json:"total_nanos"`
+	AverageNanos    uint64   `json:"average_nanos"`
+	P50BucketNanos  uint64   `json:"p50_bucket_nanos"`
+	P90BucketNanos  uint64   `json:"p90_bucket_nanos"`
+	P95BucketNanos  uint64   `json:"p95_bucket_nanos"`
+	P99BucketNanos  uint64   `json:"p99_bucket_nanos"`
+	P999BucketNanos uint64   `json:"p999_bucket_nanos"`
+	Buckets         []uint64 `json:"buckets"`
 }
 
 type soakOracleReport struct {
@@ -347,34 +449,42 @@ type soakPartitionReport struct {
 }
 
 type soakMetricsReport struct {
-	Version            uint32                         `json:"version"`
-	MeasurementNanos   uint64                         `json:"measurement_nanos"`
-	Profile            string                         `json:"profile"`
-	Offered            uint64                         `json:"offered"`
-	Acknowledged       uint64                         `json:"acknowledged"`
-	Unknown            uint64                         `json:"unknown"`
-	KnownRejected      uint64                         `json:"known_rejected"`
-	Cancelled          uint64                         `json:"cancelled"`
-	OverloadCalls      uint64                         `json:"overload_calls"`
-	AcknowledgedBytes  uint64                         `json:"acknowledged_bytes"`
-	DeliveredBytes     uint64                         `json:"delivered_payload_bytes"`
-	MaxGoroutines      uint64                         `json:"max_goroutines"`
-	MaxOpenFiles       uint64                         `json:"max_open_files"`
-	MaxHeapBytes       uint64                         `json:"max_heap_bytes"`
-	MaxRSSBytes        uint64                         `json:"max_rss_bytes"`
-	GCycles            uint64                         `json:"gc_cycles"`
-	ProcessReadBytes   uint64                         `json:"process_read_bytes"`
-	ProcessWriteBytes  uint64                         `json:"process_write_bytes"`
-	ProcessUserTicks   uint64                         `json:"process_user_ticks"`
-	ProcessSystemTicks uint64                         `json:"process_system_ticks"`
-	LagSamples         uint64                         `json:"lag_samples"`
-	AverageDeliveryLag uint64                         `json:"average_delivery_lag"`
-	MaxDeliveryLag     uint64                         `json:"max_delivery_lag"`
-	AverageCommitLag   uint64                         `json:"average_commit_lag"`
-	MaxCommitLag       uint64                         `json:"max_commit_lag"`
-	Latency            map[string]soakLatencyReport   `json:"latency"`
-	Partitions         map[string]soakPartitionReport `json:"partitions"`
-	Oracles            map[string]soakOracleReport    `json:"oracles"`
+	Version              uint32                         `json:"version"`
+	WarmupNanos          uint64                         `json:"warmup_nanos"`
+	MeasurementNanos     uint64                         `json:"measurement_nanos"`
+	TotalNanos           uint64                         `json:"total_nanos"`
+	Phases               []soakPhaseReport              `json:"phases"`
+	SampleIntervalNanos  uint64                         `json:"sample_interval_nanos"`
+	SamplesDropped       uint64                         `json:"samples_dropped"`
+	SchedulerLate        uint64                         `json:"scheduler_late"`
+	MaxSchedulerLateness uint64                         `json:"max_scheduler_lateness_nanos"`
+	Samples              []soakSample                   `json:"samples"`
+	Profile              string                         `json:"profile"`
+	Offered              uint64                         `json:"offered"`
+	Acknowledged         uint64                         `json:"acknowledged"`
+	Unknown              uint64                         `json:"unknown"`
+	KnownRejected        uint64                         `json:"known_rejected"`
+	Cancelled            uint64                         `json:"cancelled"`
+	OverloadCalls        uint64                         `json:"overload_calls"`
+	AcknowledgedBytes    uint64                         `json:"acknowledged_bytes"`
+	DeliveredBytes       uint64                         `json:"delivered_payload_bytes"`
+	MaxGoroutines        uint64                         `json:"max_goroutines"`
+	MaxOpenFiles         uint64                         `json:"max_open_files"`
+	MaxHeapBytes         uint64                         `json:"max_heap_bytes"`
+	MaxRSSBytes          uint64                         `json:"max_rss_bytes"`
+	GCycles              uint64                         `json:"gc_cycles"`
+	ProcessReadBytes     uint64                         `json:"process_read_bytes"`
+	ProcessWriteBytes    uint64                         `json:"process_write_bytes"`
+	ProcessUserTicks     uint64                         `json:"process_user_ticks"`
+	ProcessSystemTicks   uint64                         `json:"process_system_ticks"`
+	LagSamples           uint64                         `json:"lag_samples"`
+	AverageDeliveryLag   uint64                         `json:"average_delivery_lag"`
+	MaxDeliveryLag       uint64                         `json:"max_delivery_lag"`
+	AverageCommitLag     uint64                         `json:"average_commit_lag"`
+	MaxCommitLag         uint64                         `json:"max_commit_lag"`
+	Latency              map[string]soakLatencyReport   `json:"latency"`
+	Partitions           map[string]soakPartitionReport `json:"partitions"`
+	Oracles              map[string]soakOracleReport    `json:"oracles"`
 }
 
 func writeSoakMetrics(path string, metrics *soakMetrics, oracles map[string]*soakOracle, elapsed time.Duration) error {
@@ -387,35 +497,54 @@ func writeSoakMetrics(path string, metrics *soakMetrics, oracles map[string]*soa
 	if elapsed <= 0 {
 		elapsed = time.Nanosecond
 	}
+	measurement := metrics.measurementDuration()
+	if measurement <= 0 {
+		measurement = elapsed
+	}
+	samples, samplesDropped := metrics.sampleSnapshot()
+	drain := metrics.phaseDuration("drain")
+	verify := metrics.phaseDuration("verify")
+	cleanup := elapsed - measurement - drain - verify
+	if cleanup < 0 {
+		cleanup = 0
+	}
 	report := soakMetricsReport{
-		Version:            1,
-		MeasurementNanos:   uint64(elapsed),
-		Profile:            os.Getenv("IMMULOG_SOAK_PROFILE"),
-		Offered:            metrics.offered.Load(),
-		Acknowledged:       metrics.acknowledged.Load(),
-		Unknown:            metrics.unknown.Load(),
-		KnownRejected:      metrics.knownRejected.Load(),
-		Cancelled:          metrics.cancelled.Load(),
-		OverloadCalls:      metrics.overloadCalls.Load(),
-		AcknowledgedBytes:  metrics.acknowledgedBytes.Load(),
-		DeliveredBytes:     metrics.deliveredBytes.Load(),
-		MaxGoroutines:      metrics.maxGoroutines.Load(),
-		MaxOpenFiles:       metrics.maxOpenFiles.Load(),
-		MaxHeapBytes:       metrics.maxHeapBytes.Load(),
-		MaxRSSBytes:        metrics.maxRSSBytes.Load(),
-		GCycles:            metrics.gcCycles.Load(),
-		ProcessReadBytes:   metrics.processReadBytes.Load(),
-		ProcessWriteBytes:  metrics.processWriteBytes.Load(),
-		ProcessUserTicks:   metrics.processUserTicks.Load(),
-		ProcessSystemTicks: metrics.processSystemTicks.Load(),
-		LagSamples:         lagSamples,
-		AverageDeliveryLag: averageDeliveryLag,
-		MaxDeliveryLag:     metrics.maxDeliveryLag.Load(),
-		AverageCommitLag:   averageCommitLag,
-		MaxCommitLag:       metrics.maxCommitLag.Load(),
-		Latency:            make(map[string]soakLatencyReport),
-		Partitions:         make(map[string]soakPartitionReport, soakPartitionCount),
-		Oracles:            make(map[string]soakOracleReport, len(oracles)),
+		Version:              2,
+		WarmupNanos:          metrics.warmupNanos,
+		MeasurementNanos:     uint64(measurement),
+		TotalNanos:           uint64(elapsed),
+		Phases:               []soakPhaseReport{{Name: "measure", DurationNanos: uint64(measurement)}, {Name: "drain", DurationNanos: uint64(drain)}, {Name: "verify", DurationNanos: uint64(verify)}, {Name: "cleanup", DurationNanos: uint64(cleanup)}},
+		SampleIntervalNanos:  uint64(metrics.sampleIntervalNanos),
+		SamplesDropped:       samplesDropped,
+		SchedulerLate:        metrics.schedulerLate.Load(),
+		MaxSchedulerLateness: metrics.maxSchedulerLateness.Load(),
+		Samples:              samples,
+		Profile:              os.Getenv("IMMULOG_SOAK_PROFILE"),
+		Offered:              metrics.offered.Load(),
+		Acknowledged:         metrics.acknowledged.Load(),
+		Unknown:              metrics.unknown.Load(),
+		KnownRejected:        metrics.knownRejected.Load(),
+		Cancelled:            metrics.cancelled.Load(),
+		OverloadCalls:        metrics.overloadCalls.Load(),
+		AcknowledgedBytes:    metrics.acknowledgedBytes.Load(),
+		DeliveredBytes:       metrics.deliveredBytes.Load(),
+		MaxGoroutines:        metrics.maxGoroutines.Load(),
+		MaxOpenFiles:         metrics.maxOpenFiles.Load(),
+		MaxHeapBytes:         metrics.maxHeapBytes.Load(),
+		MaxRSSBytes:          metrics.maxRSSBytes.Load(),
+		GCycles:              metrics.gcCycles.Load(),
+		ProcessReadBytes:     metrics.processReadBytes.Load(),
+		ProcessWriteBytes:    metrics.processWriteBytes.Load(),
+		ProcessUserTicks:     metrics.processUserTicks.Load(),
+		ProcessSystemTicks:   metrics.processSystemTicks.Load(),
+		LagSamples:           lagSamples,
+		AverageDeliveryLag:   averageDeliveryLag,
+		MaxDeliveryLag:       metrics.maxDeliveryLag.Load(),
+		AverageCommitLag:     averageCommitLag,
+		MaxCommitLag:         metrics.maxCommitLag.Load(),
+		Latency:              make(map[string]soakLatencyReport),
+		Partitions:           make(map[string]soakPartitionReport, soakPartitionCount),
+		Oracles:              make(map[string]soakOracleReport, len(oracles)),
 	}
 	latencies := []struct {
 		name       string
@@ -438,18 +567,20 @@ func writeSoakMetrics(path string, metrics *soakMetrics, oracles map[string]*soa
 			values[index] = latency.buckets[index].Load()
 		}
 		latencyReport := soakLatencyReport{
-			Operations:     latency.operations.Load(),
-			TotalNanos:     latency.nanos.Load(),
-			AverageNanos:   averageLatencyNanos(latency.operations.Load(), latency.nanos.Load()),
-			P50BucketNanos: latencyBucketQuantile(values, 0.50),
-			P95BucketNanos: latencyBucketQuantile(values, 0.95),
-			P99BucketNanos: latencyBucketQuantile(values, 0.99),
-			Buckets:        values,
+			Operations:      latency.operations.Load(),
+			TotalNanos:      latency.nanos.Load(),
+			AverageNanos:    averageLatencyNanos(latency.operations.Load(), latency.nanos.Load()),
+			P50BucketNanos:  latencyBucketQuantile(values, 0.50),
+			P90BucketNanos:  latencyBucketQuantile(values, 0.90),
+			P95BucketNanos:  latencyBucketQuantile(values, 0.95),
+			P99BucketNanos:  latencyBucketQuantile(values, 0.99),
+			P999BucketNanos: latencyBucketQuantile(values, 0.999),
+			Buckets:         values,
 		}
 		report.Latency[latency.name] = latencyReport
 	}
 	for partition := range metrics.partitions {
-		report.Partitions[fmt.Sprintf("%s/%d", soakStableTopic, partition)] = metrics.partitionReport(partition, elapsed)
+		report.Partitions[fmt.Sprintf("%s/%d", soakStableTopic, partition)] = metrics.partitionReport(partition, measurement)
 	}
 	for key, oracle := range oracles {
 		report.Oracles[key] = soakOracleReport{
@@ -495,6 +626,18 @@ func soakDuration() (time.Duration, error) {
 	return duration, nil
 }
 
+func soakWarmup() (time.Duration, error) {
+	value := os.Getenv("IMMULOG_SOAK_WARMUP")
+	if value == "" {
+		return 0, nil
+	}
+	warmup, err := time.ParseDuration(value)
+	if err != nil || warmup < 0 {
+		return 0, fmt.Errorf("IMMULOG_SOAK_WARMUP must be nonnegative, got %q", value)
+	}
+	return warmup, nil
+}
+
 func soakReopenInterval(duration time.Duration) (time.Duration, error) {
 	value := os.Getenv("IMMULOG_SOAK_REOPEN_INTERVAL")
 	if value == "" {
@@ -520,6 +663,42 @@ func soakAppendInterval() (time.Duration, error) {
 		return 0, fmt.Errorf("IMMULOG_SOAK_APPEND_INTERVAL must be nonnegative, got %q", value)
 	}
 	return interval, nil
+}
+
+func soakSampleInterval() (time.Duration, error) {
+	value := os.Getenv("IMMULOG_SOAK_SAMPLE_INTERVAL")
+	if value == "" {
+		return soakDefaultSampleEvery, nil
+	}
+	interval, err := time.ParseDuration(value)
+	if err != nil || interval <= 0 {
+		return 0, fmt.Errorf("IMMULOG_SOAK_SAMPLE_INTERVAL must be positive, got %q", value)
+	}
+	return interval, nil
+}
+
+func soakSampleLimit() (uint64, error) {
+	value := os.Getenv("IMMULOG_SOAK_SAMPLE_LIMIT")
+	if value == "" {
+		return soakDefaultSampleLimit, nil
+	}
+	limit, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || limit == 0 {
+		return 0, fmt.Errorf("IMMULOG_SOAK_SAMPLE_LIMIT must be positive, got %q", value)
+	}
+	return limit, nil
+}
+
+func soakProducerRate() (float64, error) {
+	value := os.Getenv("IMMULOG_SOAK_PRODUCER_RATE")
+	if value == "" {
+		return 0, nil
+	}
+	rate, err := strconv.ParseFloat(value, 64)
+	if err != nil || rate < 0 {
+		return 0, fmt.Errorf("IMMULOG_SOAK_PRODUCER_RATE must be nonnegative, got %q", value)
+	}
+	return rate, nil
 }
 
 func soakChurnInterval() (time.Duration, error) {
@@ -702,7 +881,7 @@ func newSoakOracles(fixture soakFixture, checkpoint soakCheckpoint, seed, run ui
 	return oracles, nil
 }
 
-func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixture, oracles map[string]*soakOracle, metrics *soakMetrics, run, seed uint64, sequenceCounter *atomic.Uint64, appendInterval, churnInterval, reopenInterval, overloadPeriod, overloadWindow time.Duration, stressCancellation bool) error {
+func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixture, oracles map[string]*soakOracle, metrics *soakMetrics, run, seed uint64, sequenceCounter *atomic.Uint64, appendInterval time.Duration, producerRate float64, churnInterval, reopenInterval, overloadPeriod, overloadWindow time.Duration, stressCancellation bool) error {
 	members := soakGroupMembers(fixture.stable.ID, false)
 	consumer, err := store.OpenConsumerGroup(parent, "soak-workers", members, soakGroupOptions())
 	if err != nil {
@@ -728,12 +907,12 @@ func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixt
 			workerWait.Add(1)
 			go func(partition, producer uint32) {
 				defer workerWait.Done()
-				producerLoop(cycleContext, cycleStart, fixture.retainedParts[partition], seed, run, partition*soakProducerCount+producer, sequenceCounter, appendInterval, overloadPeriod, overloadWindow, stressCancellation, metrics, oracles[soakPartitionKey(soakRetainedTopic, partition)], report)
+				producerLoop(cycleContext, cycleStart, fixture.retainedParts[partition], seed, run, partition*soakProducerCount+producer, sequenceCounter, appendInterval, producerRate, overloadPeriod, overloadWindow, stressCancellation, metrics, oracles[soakPartitionKey(soakRetainedTopic, partition)], report)
 			}(partition, producer)
 			workerWait.Add(1)
 			go func(partition, producer uint32) {
 				defer workerWait.Done()
-				producerLoop(cycleContext, cycleStart, fixture.stableParts[partition], seed, run, 100+partition*soakProducerCount+producer, sequenceCounter, appendInterval, overloadPeriod, overloadWindow, stressCancellation, metrics, oracles[soakPartitionKey(soakStableTopic, partition)], report)
+				producerLoop(cycleContext, cycleStart, fixture.stableParts[partition], seed, run, 100+partition*soakProducerCount+producer, sequenceCounter, appendInterval, producerRate, overloadPeriod, overloadWindow, stressCancellation, metrics, oracles[soakPartitionKey(soakStableTopic, partition)], report)
 			}(partition, producer)
 		}
 	}
@@ -780,6 +959,7 @@ func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixt
 	select {
 	case <-timer.C:
 	case <-parent.Done():
+		metrics.finishMeasurement(time.Now())
 	case <-cycleContext.Done():
 	}
 	if !timer.Stop() {
@@ -788,8 +968,10 @@ func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixt
 		default:
 		}
 	}
+	metrics.addMeasurement(time.Since(cycleStart))
 	cancel()
 	workerWait.Wait()
+	drainStarted := time.Now()
 	current := handle.currentConsumer()
 	if current != nil {
 		if closeErr := current.Close(); closeErr != nil && firstErr == nil {
@@ -801,6 +983,8 @@ func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixt
 		firstErr = waitForSoakAdmissionDrain(drainContext, fixture)
 		drainCancel()
 	}
+	metrics.recordPhase("drain", time.Since(drainStarted))
+	verifyStarted := time.Now()
 	if firstErr == nil {
 		if retentionErr := store.RunRetention(context.Background()); retentionErr != nil {
 			firstErr = fmt.Errorf("force final soak retention pass: %w", retentionErr)
@@ -814,6 +998,7 @@ func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixt
 	if firstErr == nil {
 		firstErr = checkSoakAdmissionDrained(fixture)
 	}
+	metrics.recordPhase("verify", time.Since(verifyStarted))
 	closeErr := store.Close()
 	if closeErr != nil && firstErr == nil {
 		firstErr = fmt.Errorf("close soak store: %w", closeErr)
@@ -821,8 +1006,17 @@ func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixt
 	return firstErr
 }
 
-func producerLoop(ctx context.Context, started time.Time, partition *storage.Partition, seed, run uint64, producer uint32, sequenceCounter *atomic.Uint64, appendInterval, overloadPeriod, overloadWindow time.Duration, stressCancellation bool, metrics *soakMetrics, oracle *soakOracle, report func(error)) {
+func producerLoop(ctx context.Context, started time.Time, partition *storage.Partition, seed, run uint64, producer uint32, sequenceCounter *atomic.Uint64, appendInterval time.Duration, producerRate float64, overloadPeriod, overloadWindow time.Duration, stressCancellation bool, metrics *soakMetrics, oracle *soakOracle, report func(error)) {
 	random := rand.New(rand.NewSource(int64(seed + uint64(producer))))
+	var nextDeadline time.Time
+	var targetInterval time.Duration
+	if producerRate > 0 {
+		targetInterval = time.Duration(float64(time.Second) * float64(soakProducerWorkers) / producerRate)
+		if targetInterval < time.Nanosecond {
+			targetInterval = time.Nanosecond
+		}
+		nextDeadline = time.Now()
+	}
 	for {
 		if ctx.Err() != nil {
 			return
@@ -836,6 +1030,9 @@ func producerLoop(ctx context.Context, started time.Time, partition *storage.Par
 			return
 		}
 		metrics.offered.Add(1)
+		if oracle.topic == metrics.stableTopic {
+			metrics.stableOffered.Add(1)
+		}
 		elapsed := time.Since(started) % overloadPeriod
 		overload := elapsed >= overloadPeriod-overloadWindow
 		callContext := ctx
@@ -860,6 +1057,9 @@ func producerLoop(ctx context.Context, started time.Time, partition *storage.Par
 			}
 			metrics.acknowledged.Add(1)
 			metrics.acknowledgedBytes.Add(uint64(len(value)))
+			if oracle.topic == metrics.stableTopic {
+				metrics.stableAcknowledged.Add(1)
+			}
 		} else {
 			if appendErr := oracle.reject(key); appendErr != nil {
 				report(appendErr)
@@ -880,6 +1080,21 @@ func producerLoop(ctx context.Context, started time.Time, partition *storage.Par
 		}
 		if overload {
 			metrics.overloadCalls.Add(1)
+		} else if producerRate > 0 {
+			nextDeadline = nextDeadline.Add(targetInterval)
+			now := time.Now()
+			if now.Before(nextDeadline) {
+				timer := time.NewTimer(nextDeadline.Sub(now))
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				}
+			} else {
+				metrics.recordSchedulerLate(now.Sub(nextDeadline))
+				nextDeadline = now
+			}
 		} else if appendInterval != 0 {
 			timer := time.NewTimer(appendInterval)
 			select {
@@ -1172,7 +1387,7 @@ func maintenanceLoop(ctx context.Context, store *storage.Store, report func(erro
 }
 
 func statsLoop(ctx context.Context, store *storage.Store, handle *soakGroupHandle, topic api.TopicID, metrics *soakMetrics, report func(error)) {
-	ticker := time.NewTicker(250 * time.Millisecond)
+	ticker := time.NewTicker(time.Duration(metrics.sampleIntervalNanos))
 	defer ticker.Stop()
 	for {
 		select {
@@ -1182,15 +1397,18 @@ func statsLoop(ctx context.Context, store *storage.Store, handle *soakGroupHandl
 				report(fmt.Errorf("sample soak stats: %w", err))
 				return
 			}
-			metrics.sampleRuntime()
+			resources := metrics.sampleRuntime()
+			consumerStats := make([]storage.ConsumerStats, 0, soakPartitionCount)
 			if consumer := handle.currentConsumer(); consumer != nil {
 				for partition := uint32(0); partition < soakPartitionCount; partition++ {
-					consumerStats, statsErr := consumer.Stats(topic, partition)
-					if statsErr == nil && consumerStats.Active {
-						metrics.recordLag(partition, consumerStats.DeliveryLag, consumerStats.CommitLag)
+					stats, statsErr := consumer.Stats(topic, partition)
+					if statsErr == nil && stats.Active {
+						consumerStats = append(consumerStats, stats)
+						metrics.recordLag(partition, stats.DeliveryLag, stats.CommitLag)
 					}
 				}
 			}
+			metrics.recordSample(time.Now(), resources, consumerStats)
 			if err == nil && stats.OffsetsHistoryRemaining == 0 {
 				report(errors.New("soak exhausted consumer-offset history capacity"))
 				return
@@ -1551,21 +1769,151 @@ func (handle *soakGroupHandle) replaceConsumer(consumer *storage.GroupConsumer) 
 	handle.mu.Unlock()
 }
 
-func (metrics *soakMetrics) sampleRuntime() {
-	metrics.updateMax(&metrics.maxGoroutines, uint64(runtime.NumGoroutine()))
+func newSoakMetrics(sampleInterval time.Duration, sampleLimit uint64) *soakMetrics {
+	if sampleInterval <= 0 {
+		sampleInterval = soakDefaultSampleEvery
+	}
+	if sampleLimit == 0 {
+		sampleLimit = soakDefaultSampleLimit
+	}
+	return &soakMetrics{sampleIntervalNanos: int64(sampleInterval), sampleLimit: sampleLimit, samples: make([]soakSample, 0, minUint64(sampleLimit, 1024)), phaseDurations: make(map[string]time.Duration)}
+}
+
+func minUint64(left, right uint64) int {
+	if left < right {
+		return int(left)
+	}
+	return int(right)
+}
+
+func (metrics *soakMetrics) startMeasurement(now time.Time) {
+	metrics.measurementStarted.Store(now.UnixNano())
+	metrics.measurementFinished.Store(0)
+	metrics.measurementAccumulated.Store(0)
+}
+
+func (metrics *soakMetrics) finishMeasurement(now time.Time) {
+	metrics.measurementFinished.CompareAndSwap(0, now.UnixNano())
+}
+
+func (metrics *soakMetrics) addMeasurement(duration time.Duration) {
+	if duration > 0 {
+		metrics.measurementAccumulated.Add(int64(duration))
+	}
+}
+
+func (metrics *soakMetrics) measurementDuration() time.Duration {
+	if accumulated := metrics.measurementAccumulated.Load(); accumulated > 0 {
+		return time.Duration(accumulated)
+	}
+	started := metrics.measurementStarted.Load()
+	finished := metrics.measurementFinished.Load()
+	if started == 0 {
+		return 0
+	}
+	if finished == 0 {
+		finished = time.Now().UnixNano()
+	}
+	if finished <= started {
+		return 0
+	}
+	return time.Duration(finished - started)
+}
+
+func (metrics *soakMetrics) recordPhase(name string, duration time.Duration) {
+	if duration <= 0 {
+		return
+	}
+	metrics.phaseMu.Lock()
+	metrics.phaseDurations[name] += duration
+	metrics.phaseMu.Unlock()
+}
+
+func (metrics *soakMetrics) phaseDuration(name string) time.Duration {
+	metrics.phaseMu.Lock()
+	defer metrics.phaseMu.Unlock()
+	return metrics.phaseDurations[name]
+}
+
+func (metrics *soakMetrics) recordSchedulerLate(lateness time.Duration) {
+	if lateness <= 0 {
+		return
+	}
+	metrics.schedulerLate.Add(1)
+	metrics.updateMax(&metrics.maxSchedulerLateness, uint64(lateness))
+}
+
+func (metrics *soakMetrics) recordSample(now time.Time, resources soakResourceSample, consumerStats []storage.ConsumerStats) {
+	started := metrics.measurementStarted.Load()
+	if started == 0 {
+		return
+	}
+	elapsed := now.UnixNano() - started
+	if elapsed < 0 {
+		return
+	}
+	sample := soakSample{
+		ElapsedNanos: uint64(elapsed),
+		Phase:        "measure",
+		Offered:      metrics.stableOffered.Load(),
+		Acknowledged: metrics.stableAcknowledged.Load(),
+		Resources:    resources,
+		Partitions:   make(map[string]soakSamplePartition, len(consumerStats)),
+	}
+	for _, stats := range consumerStats {
+		key := soakPartitionKey(soakStableTopic, stats.Partition)
+		sample.Partitions[key] = soakSamplePartition{
+			DurableEnd:   stats.DurableEnd,
+			NextDelivery: stats.NextDelivery,
+			Committed:    stats.CommittedOrInitial,
+			DeliveryLag:  stats.DeliveryLag,
+			CommitLag:    stats.CommitLag,
+		}
+	}
+	for partition := range metrics.partitions {
+		sample.Delivered += metrics.partitions[partition].deliveredRecords.Load()
+		sample.Committed += metrics.partitions[partition].commitRecords.Load()
+	}
+	metrics.sampleMu.Lock()
+	defer metrics.sampleMu.Unlock()
+	if uint64(len(metrics.samples)) >= metrics.sampleLimit {
+		metrics.samplesDropped++
+		return
+	}
+	metrics.samples = append(metrics.samples, sample)
+}
+
+func (metrics *soakMetrics) sampleSnapshot() ([]soakSample, uint64) {
+	metrics.sampleMu.Lock()
+	defer metrics.sampleMu.Unlock()
+	return append([]soakSample(nil), metrics.samples...), metrics.samplesDropped
+}
+
+func (metrics *soakMetrics) sampleRuntime() soakResourceSample {
+	goroutines := uint64(runtime.NumGoroutine())
+	openFiles := uint64(0)
 	if entries, err := os.ReadDir("/proc/self/fd"); err == nil {
-		metrics.updateMax(&metrics.maxOpenFiles, uint64(len(entries)))
+		openFiles = uint64(len(entries))
 	}
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
+	metrics.updateMax(&metrics.maxGoroutines, goroutines)
+	metrics.updateMax(&metrics.maxOpenFiles, openFiles)
 	metrics.updateMax(&metrics.maxHeapBytes, memory.HeapAlloc)
 	metrics.updateMax(&metrics.gcCycles, uint64(memory.NumGC))
-	if rss, readBytes, writeBytes, userTicks, systemTicks, ok := processMetrics(); ok {
+	var rss, readBytes, writeBytes, userTicks, systemTicks uint64
+	if sampledRSS, sampledRead, sampledWrite, sampledUser, sampledSystem, ok := processMetrics(); ok {
+		rss, readBytes, writeBytes, userTicks, systemTicks = sampledRSS, sampledRead, sampledWrite, sampledUser, sampledSystem
 		metrics.updateMax(&metrics.maxRSSBytes, rss)
 		metrics.processReadBytes.Store(readBytes)
 		metrics.processWriteBytes.Store(writeBytes)
 		metrics.processUserTicks.Store(userTicks)
 		metrics.processSystemTicks.Store(systemTicks)
+	}
+	return soakResourceSample{
+		Goroutines: goroutines, OpenFiles: openFiles, HeapBytes: memory.HeapAlloc,
+		RSSBytes: rss, GCCycles: uint64(memory.NumGC), ReadBytes: readBytes,
+		WriteBytes: writeBytes, UserTicks: userTicks, SystemTicks: systemTicks,
 	}
 }
 
@@ -1740,7 +2088,7 @@ func latencyBucketQuantile(values []uint64, fraction float64) uint64 {
 	if target == 0 {
 		target = 1
 	}
-	boundaries := [...]uint64{1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000}
+	boundaries := [...]uint64{1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000, 5_000_000_000, 10_000_000_000, 30_000_000_000, 60_000_000_000}
 	var cumulative uint64
 	for index, value := range values {
 		cumulative += value
@@ -1757,7 +2105,7 @@ func latencyBucketQuantile(values []uint64, fraction float64) uint64 {
 func recordSoakLatency(operations, nanos *atomic.Uint64, buckets *[soakLatencyBucketCount]atomic.Uint64, elapsed time.Duration) {
 	operations.Add(1)
 	nanos.Add(uint64(elapsed))
-	boundaries := [...]time.Duration{time.Microsecond, 10 * time.Microsecond, 100 * time.Microsecond, time.Millisecond, 10 * time.Millisecond, 100 * time.Millisecond, time.Second}
+	boundaries := [...]time.Duration{time.Microsecond, 10 * time.Microsecond, 100 * time.Microsecond, time.Millisecond, 10 * time.Millisecond, 100 * time.Millisecond, time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second, time.Minute}
 	bucket := len(boundaries)
 	for index, boundary := range boundaries {
 		if elapsed < boundary {

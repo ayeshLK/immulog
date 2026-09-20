@@ -8,11 +8,17 @@ Usage: perf/soak/run.sh [options]
 Run the mixed workload soak with a dedicated data directory and captured evidence.
 
 Options:
-  -d, --duration VALUE          Soak duration (default: 4h)
+  -d, --duration VALUE          Measurement duration (default: 4h)
+      --warmup VALUE            Optional warmup duration excluded from metrics (default: 0)
   -p, --profile NAME            Workload profile: mixed or sustained (default: mixed)
   -s, --seed VALUE              Deterministic seed (default: 0x5eed5eed)
   -r, --reopen-interval VALUE   Store reopen interval (default: 10m)
   -a, --append-interval VALUE   Producer append interval (default: 20ms)
+      --producer-rate VALUE     Target aggregate producer rate in records/s (default: unlimited)
+      --rate-sweep LIST         Run isolated directories for comma-separated rates
+      --sample-interval VALUE   Runtime/backlog sample interval (default: 250ms)
+      --sample-limit VALUE      Maximum retained samples (default: 100000)
+      --analyze                 Write a Markdown summary beside metrics.json
   -c, --churn-interval VALUE    Membership replacement interval, or 0 to disable (default: 750ms)
   -t, --timeout VALUE            Go test timeout (default: 4h30m)
   -f, --minimum-free-bytes VALUE Minimum free space or auto (default: auto, ~24 GiB for 4h)
@@ -40,10 +46,16 @@ log_file=''
 metrics_file=''
 environment_file=''
 duration=4h
+warmup=0s
 profile=mixed
 seed=0x5eed5eed
 reopen_interval=10m
 append_interval=20ms
+producer_rate=''
+sample_interval=250ms
+sample_limit=100000
+analyze=0
+rate_sweep=''
 churn_interval=750ms
 timeout=4h30m
 minimum_free_bytes=auto
@@ -64,6 +76,12 @@ while [[ $# -gt 0 ]]; do
 		duration=$2
 		shift 2
 		;;
+	--warmup)
+		require_value "$@"
+		warmup=$2
+		shift 2
+		;;
+	--warmup=*) warmup=${1#*=}; shift ;;
 	--duration=*) duration=${1#*=}; shift ;;
 	-p|--profile)
 		require_value "$@"
@@ -89,6 +107,31 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--append-interval=*) append_interval=${1#*=}; shift ;;
+	--producer-rate)
+		require_value "$@"
+		producer_rate=$2
+		shift 2
+		;;
+	--producer-rate=*) producer_rate=${1#*=}; shift ;;
+	--sample-interval)
+		require_value "$@"
+		sample_interval=$2
+		shift 2
+		;;
+	--sample-interval=*) sample_interval=${1#*=}; shift ;;
+	--sample-limit)
+		require_value "$@"
+		sample_limit=$2
+		shift 2
+		;;
+	--sample-limit=*) sample_limit=${1#*=}; shift ;;
+	--analyze) analyze=1; shift ;;
+	--rate-sweep)
+		require_value "$@"
+		rate_sweep=$2
+		shift 2
+		;;
+	--rate-sweep=*) rate_sweep=${1#*=}; shift ;;
 	-c|--churn-interval)
 		require_value "$@"
 		churn_interval=$2
@@ -178,6 +221,23 @@ if [[ -z "$environment_file" ]]; then
 	environment_file="$run_root/environment.txt"
 fi
 
+if [[ -n "$rate_sweep" ]]; then
+	IFS=',' read -r -a sweep_rates <<< "$rate_sweep"
+	for sweep_rate in "${sweep_rates[@]}"; do
+		if ! [[ "$sweep_rate" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+			echo "rate sweep contains an invalid rate: $sweep_rate" >&2
+			exit 2
+		fi
+		rate_dir="$run_root/rate-${sweep_rate//./_}"
+		args=(--run-dir "$rate_dir" --profile "$profile" --duration "$duration" --warmup "$warmup" --timeout "$timeout" --seed "$seed" --reopen-interval "$reopen_interval" --append-interval "$append_interval" --churn-interval "$churn_interval" --sample-interval "$sample_interval" --sample-limit "$sample_limit" --producer-rate "$sweep_rate" --minimum-free-bytes "$minimum_free_bytes" --minimum-open-files "$minimum_open_files")
+		if (( analyze )); then
+			args+=(--analyze)
+		fi
+		"$0" "${args[@]}"
+	done
+	exit 0
+fi
+
 if [[ -z "$data_dir" || "$data_dir" == "/" ]]; then
 	echo "data directory must be dedicated and cannot be the filesystem root" >&2
 	exit 2
@@ -192,6 +252,14 @@ if [[ "$minimum_open_files" != auto && ! "$minimum_open_files" =~ ^[0-9]+$ ]]; t
 fi
 if [[ "$profile" != mixed && "$profile" != sustained ]]; then
 	echo "profile must be mixed or sustained" >&2
+	exit 2
+fi
+if [[ -n "$producer_rate" ]] && ! [[ "$producer_rate" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+	echo "producer rate must be a nonnegative number" >&2
+	exit 2
+fi
+if ! [[ "$sample_limit" =~ ^[1-9][0-9]*$ ]]; then
+	echo "sample limit must be a positive integer" >&2
 	exit 2
 fi
 
@@ -273,11 +341,15 @@ fi
 	printf 'commit=%s\n' "$(git rev-parse HEAD)"
 	printf 'branch=%s\n' "$(git branch --show-current)"
 	printf 'duration=%s\n' "$duration"
+	printf 'warmup=%s\n' "$warmup"
 	printf 'profile=%s\n' "$profile"
 	printf 'duration_seconds=%s\n' "$duration_seconds"
 	printf 'seed=%s\n' "$seed"
 	printf 'reopen_interval=%s\n' "$reopen_interval"
 	printf 'append_interval=%s\n' "$append_interval"
+	printf 'producer_rate=%s\n' "${producer_rate:-unlimited}"
+	printf 'sample_interval=%s\n' "$sample_interval"
+	printf 'sample_limit=%s\n' "$sample_limit"
 	printf 'churn_interval=%s\n' "$churn_interval"
 	printf 'timeout=%s\n' "$timeout"
 	printf 'minimum_free_bytes=%s\n' "$minimum_free_bytes"
@@ -302,13 +374,23 @@ IMMULOG_SOAK_DIR="$data_dir" \
 IMMULOG_SOAK_PROFILE="$profile" \
 IMMULOG_SOAK_SEED="$seed" \
 IMMULOG_SOAK_DURATION="$duration" \
+IMMULOG_SOAK_WARMUP="$warmup" \
 IMMULOG_SOAK_REOPEN_INTERVAL="$reopen_interval" \
 IMMULOG_SOAK_APPEND_INTERVAL="$append_interval" \
+IMMULOG_SOAK_PRODUCER_RATE="${producer_rate:-0}" \
+IMMULOG_SOAK_SAMPLE_INTERVAL="$sample_interval" \
+IMMULOG_SOAK_SAMPLE_LIMIT="$sample_limit" \
 IMMULOG_SOAK_CHURN_INTERVAL="$churn_interval" \
 IMMULOG_SOAK_METRICS_FILE="$metrics_file" \
 go test -v ./perf/soak -run '^TestMixedWorkloadSoak$' -count=1 -timeout="$timeout" 2>&1 | tee "$log_file"
 status=${PIPESTATUS[0]}
 set -e
+
+if (( status == 0 && analyze )); then
+	if ! go run ./perf/analyze --input "$metrics_file" --format markdown > "$run_root/summary.md"; then
+		status=1
+	fi
+fi
 
 final_free_bytes=$(free_bytes "$data_dir")
 final_data_bytes=$(data_bytes "$data_dir")

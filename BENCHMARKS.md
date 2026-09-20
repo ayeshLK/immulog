@@ -110,12 +110,20 @@ and overload injection so acknowledged throughput and lag can be evaluated as
 a local durable-throughput workload. Membership replacement remains enabled
 at a 750ms interval by default in both profiles; use
 `--churn-interval 0` for a consumer-throughput control run without deliberate
-assignment churn. Use `perf/soak/run.sh --help` to view all duration, seed,
-interval, resource, timeout, and path options. Numeric resource values override
+assignment churn. Use `--warmup 30s` to exercise a separate pre-measurement
+workload that is excluded from reported counters and rates. Use
+`--producer-rate` to apply a monotonic aggregate offered
+records-per-second schedule; omit it or use zero for unlimited stress mode. Use
+`--sample-interval` and `--sample-limit` to control bounded backlog/resource
+samples, and `--analyze` to write a measurement-aware Markdown summary. Use
+`--rate-sweep 500,1000,1500` for isolated runs, one dedicated directory per
+rate. Use `perf/soak/run.sh --help` to view all duration, seed, interval,
+resource, timeout, and path options. Numeric resource values override
 the estimates and zero disables a preflight. The runner records
-initial/final data size, free space, the churn interval, and the process
-open-file limit, and writes a machine-readable `metrics.json` sidecar
-containing counters, resource observations, aggregate and per-partition
+initial/final data size, free space, the churn interval, producer-rate controls,
+and the process open-file limit, and writes a machine-readable schema-v2
+`metrics.json` sidecar containing phase durations, counters, bounded samples,
+resource observations, aggregate and per-partition
 delivery records/bytes/rates and lag, oracle results, and latency bucket data.
 
 ### Open-file limits for long runs
@@ -194,11 +202,24 @@ Every result entry should record:
 - payload sizes, batching, topic/partition counts, and operating limits; and
 - soak duration, seed, reopen interval, retention policy, and diagnostics.
 
-Soak latency p50/p95/p99 values are upper bounds of the configured duration
-buckets, not exact order statistics. Bounded microbenchmarks may report exact
-percentiles when they retain per-operation samples. Process CPU values are
-Linux clock ticks and process I/O values are cumulative `/proc` counters; they
-are not whole-device utilization measurements.
+Soak latency p50/p90/p95/p99/p999 values are upper bounds of the configured
+duration buckets, not exact order statistics. New buckets extend through
+multi-second tails; legacy `0` still denotes the open-ended final bucket.
+Schema-v2 `warmup_nanos` records the optional pre-measurement interval;
+`measurement_nanos` covers the active workload only; `total_nanos`
+includes cleanup, and phase durations identify drain and verification time.
+Bounded microbenchmarks may report exact percentiles when they retain
+per-operation samples. Process CPU values are Linux clock ticks and process
+I/O values are cumulative `/proc` counters; they are not whole-device
+utilization measurements. Analyze artifacts with:
+
+```sh
+go run ./perf/analyze --input metrics.json --format markdown
+```
+
+Treat a sustained result with a positive sampled backlog slope, dropped
+samples, failed drain, failed verification, or assignment loss without
+replacement as invalid capacity evidence even if the process exits cleanly.
 
 A minimal environment capture is:
 
