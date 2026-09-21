@@ -57,21 +57,22 @@ type rawLatency struct {
 }
 
 type rawReport struct {
-	Version          uint32                     `json:"version"`
-	WarmupNanos      uint64                     `json:"warmup_nanos"`
-	MeasurementNanos uint64                     `json:"measurement_nanos"`
-	TotalNanos       uint64                     `json:"total_nanos"`
-	Phases           []rawPhase                 `json:"phases"`
-	SamplesDropped   uint64                     `json:"samples_dropped"`
-	Offered          uint64                     `json:"offered"`
-	Acknowledged     uint64                     `json:"acknowledged"`
-	Unknown          uint64                     `json:"unknown"`
-	KnownRejected    uint64                     `json:"known_rejected"`
-	DeliveredBytes   uint64                     `json:"delivered_payload_bytes"`
-	AckBytes         uint64                     `json:"acknowledged_bytes"`
-	Samples          []rawSample                `json:"samples"`
-	Latency          map[string]rawLatency      `json:"latency"`
-	Oracles          map[string]json.RawMessage `json:"oracles"`
+	Version              uint32                     `json:"version"`
+	WarmupNanos          uint64                     `json:"warmup_nanos"`
+	MeasurementNanos     uint64                     `json:"measurement_nanos"`
+	TotalNanos           uint64                     `json:"total_nanos"`
+	Phases               []rawPhase                 `json:"phases"`
+	SamplesDropped       uint64                     `json:"samples_dropped"`
+	ConsumerStatsSkipped uint64                     `json:"consumer_stats_skipped"`
+	Offered              uint64                     `json:"offered"`
+	Acknowledged         uint64                     `json:"acknowledged"`
+	Unknown              uint64                     `json:"unknown"`
+	KnownRejected        uint64                     `json:"known_rejected"`
+	DeliveredBytes       uint64                     `json:"delivered_payload_bytes"`
+	AckBytes             uint64                     `json:"acknowledged_bytes"`
+	Samples              []rawSample                `json:"samples"`
+	Latency              map[string]rawLatency      `json:"latency"`
+	Oracles              map[string]json.RawMessage `json:"oracles"`
 }
 
 type latencySummary struct {
@@ -83,30 +84,31 @@ type latencySummary struct {
 }
 
 type analysis struct {
-	Input              string                    `json:"input"`
-	Version            uint32                    `json:"version"`
-	WarmupNanos        uint64                    `json:"warmup_nanos"`
-	MeasurementNanos   uint64                    `json:"measurement_nanos"`
-	TotalNanos         uint64                    `json:"total_nanos"`
-	DrainNanos         uint64                    `json:"drain_nanos"`
-	VerifyNanos        uint64                    `json:"verify_nanos"`
-	OfferedRecordsPerS float64                   `json:"offered_records_per_second"`
-	AcknowledgedPerS   float64                   `json:"acknowledged_records_per_second"`
-	AcknowledgedBytesS float64                   `json:"acknowledged_bytes_per_second"`
-	DeliveredBytesS    float64                   `json:"delivered_payload_bytes_per_second"`
-	Offered            uint64                    `json:"offered"`
-	Acknowledged       uint64                    `json:"acknowledged"`
-	Unknown            uint64                    `json:"unknown"`
-	KnownRejected      uint64                    `json:"known_rejected"`
-	BacklogStart       uint64                    `json:"backlog_start"`
-	BacklogEnd         uint64                    `json:"backlog_end"`
-	BacklogMax         uint64                    `json:"backlog_max"`
-	BacklogSlopePerS   float64                   `json:"backlog_slope_per_second"`
-	Samples            uint64                    `json:"samples"`
-	SamplesDropped     uint64                    `json:"samples_dropped"`
-	Latency            map[string]latencySummary `json:"latency"`
-	Valid              bool                      `json:"valid"`
-	Reasons            []string                  `json:"reasons,omitempty"`
+	Input                string                    `json:"input"`
+	Version              uint32                    `json:"version"`
+	WarmupNanos          uint64                    `json:"warmup_nanos"`
+	MeasurementNanos     uint64                    `json:"measurement_nanos"`
+	TotalNanos           uint64                    `json:"total_nanos"`
+	DrainNanos           uint64                    `json:"drain_nanos"`
+	VerifyNanos          uint64                    `json:"verify_nanos"`
+	OfferedRecordsPerS   float64                   `json:"offered_records_per_second"`
+	AcknowledgedPerS     float64                   `json:"acknowledged_records_per_second"`
+	AcknowledgedBytesS   float64                   `json:"acknowledged_bytes_per_second"`
+	DeliveredBytesS      float64                   `json:"delivered_payload_bytes_per_second"`
+	Offered              uint64                    `json:"offered"`
+	Acknowledged         uint64                    `json:"acknowledged"`
+	Unknown              uint64                    `json:"unknown"`
+	KnownRejected        uint64                    `json:"known_rejected"`
+	BacklogStart         uint64                    `json:"backlog_start"`
+	BacklogEnd           uint64                    `json:"backlog_end"`
+	BacklogMax           uint64                    `json:"backlog_max"`
+	BacklogSlopePerS     float64                   `json:"backlog_slope_per_second"`
+	Samples              uint64                    `json:"samples"`
+	SamplesDropped       uint64                    `json:"samples_dropped"`
+	ConsumerStatsSkipped uint64                    `json:"consumer_stats_skipped"`
+	Latency              map[string]latencySummary `json:"latency"`
+	Valid                bool                      `json:"valid"`
+	Reasons              []string                  `json:"reasons,omitempty"`
 }
 
 func loadReport(path string) (rawReport, error) {
@@ -140,7 +142,8 @@ func analyze(path string, report rawReport) analysis {
 		DeliveredBytesS:    float64(report.DeliveredBytes) / seconds,
 		Offered:            report.Offered, Acknowledged: report.Acknowledged, Unknown: report.Unknown,
 		KnownRejected: report.KnownRejected, Samples: uint64(len(report.Samples)),
-		SamplesDropped: report.SamplesDropped, Latency: make(map[string]latencySummary), Valid: true,
+		SamplesDropped: report.SamplesDropped, ConsumerStatsSkipped: report.ConsumerStatsSkipped,
+		Latency: make(map[string]latencySummary), Valid: true,
 	}
 	for _, phase := range report.Phases {
 		switch phase.Name {
@@ -198,10 +201,10 @@ func bucket(value uint64) *uint64 {
 
 func renderMarkdown(results []analysis) string {
 	var builder strings.Builder
-	builder.WriteString("| Run | Valid | Measurement | Offered records/s | Acknowledged records/s | Backlog start | Backlog end | Backlog slope/s |\n")
-	builder.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|\n")
+	builder.WriteString("| Run | Valid | Measurement | Offered records/s | Acknowledged records/s | Backlog start | Backlog end | Backlog slope/s | Stats skipped |\n")
+	builder.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	for _, result := range results {
-		builder.WriteString(fmt.Sprintf("| `%s` | %t | %.1fs | %.2f | %.2f | %d | %d | %.2f |\n", result.Input, result.Valid, float64(result.MeasurementNanos)/1e9, result.OfferedRecordsPerS, result.AcknowledgedPerS, result.BacklogStart, result.BacklogEnd, result.BacklogSlopePerS))
+		builder.WriteString(fmt.Sprintf("| `%s` | %t | %.1fs | %.2f | %.2f | %d | %d | %.2f | %d |\n", result.Input, result.Valid, float64(result.MeasurementNanos)/1e9, result.OfferedRecordsPerS, result.AcknowledgedPerS, result.BacklogStart, result.BacklogEnd, result.BacklogSlopePerS, result.ConsumerStatsSkipped))
 		for _, reason := range result.Reasons {
 			builder.WriteString(fmt.Sprintf("\n- `%s`: %s\n", result.Input, reason))
 		}

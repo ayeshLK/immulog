@@ -189,6 +189,7 @@ type soakMetrics struct {
 	phaseDurations         map[string]time.Duration
 	schedulerLate          atomic.Uint64
 	maxSchedulerLateness   atomic.Uint64
+	consumerStatsSkipped   atomic.Uint64
 	offered                atomic.Uint64
 	acknowledged           atomic.Uint64
 	unknown                atomic.Uint64
@@ -458,6 +459,7 @@ type soakMetricsReport struct {
 	SamplesDropped       uint64                         `json:"samples_dropped"`
 	SchedulerLate        uint64                         `json:"scheduler_late"`
 	MaxSchedulerLateness uint64                         `json:"max_scheduler_lateness_nanos"`
+	ConsumerStatsSkipped uint64                         `json:"consumer_stats_skipped"`
 	Samples              []soakSample                   `json:"samples"`
 	Profile              string                         `json:"profile"`
 	Offered              uint64                         `json:"offered"`
@@ -518,6 +520,7 @@ func writeSoakMetrics(path string, metrics *soakMetrics, oracles map[string]*soa
 		SamplesDropped:       samplesDropped,
 		SchedulerLate:        metrics.schedulerLate.Load(),
 		MaxSchedulerLateness: metrics.maxSchedulerLateness.Load(),
+		ConsumerStatsSkipped: metrics.consumerStatsSkipped.Load(),
 		Samples:              samples,
 		Profile:              os.Getenv("IMMULOG_SOAK_PROFILE"),
 		Offered:              metrics.offered.Load(),
@@ -1402,6 +1405,10 @@ func statsLoop(ctx context.Context, store *storage.Store, handle *soakGroupHandl
 			if consumer := handle.currentConsumer(); consumer != nil {
 				for partition := uint32(0); partition < soakPartitionCount; partition++ {
 					stats, statsErr := consumer.Stats(topic, partition)
+					if errors.Is(statsErr, api.ErrConcurrentOperation) {
+						metrics.consumerStatsSkipped.Add(1)
+						continue
+					}
 					if statsErr == nil && stats.Active {
 						consumerStats = append(consumerStats, stats)
 						metrics.recordLag(partition, stats.DeliveryLag, stats.CommitLag)

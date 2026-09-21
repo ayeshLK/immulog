@@ -38,18 +38,23 @@ type ConsumerStats struct {
 	ExpiredCommittedDistance uint64
 }
 
-// Stats returns a bounded snapshot for this single-key assignment.
+// Stats returns a bounded snapshot for this single-key assignment. It returns
+// api.ErrConcurrentOperation when another operation is active.
 func (consumer *Consumer) Stats() (ConsumerStats, error) {
 	if consumer == nil || consumer.store == nil {
 		return ConsumerStats{}, api.ErrClosed
 	}
-	consumer.operation.Lock()
-	defer consumer.operation.Unlock()
-	return consumer.assignmentStats(consumer.key, consumer.next, consumer.session, consumer.generation)
+	if !consumer.operation.TryLock() {
+		return ConsumerStats{}, api.ErrConcurrentOperation
+	}
+	next := consumer.next
+	consumer.operation.Unlock()
+	return consumer.assignmentStats(consumer.key, next, consumer.session, consumer.generation)
 }
 
 // Stats returns a bounded snapshot for one partition in this membership
-// snapshot. The caller selects the partition, so the method never allocates an
+// snapshot. It returns api.ErrConcurrentOperation when another operation is
+// active. The caller selects the partition, so the method never allocates an
 // unbounded all-group diagnostic payload.
 func (consumer *GroupConsumer) Stats(topic api.TopicID, partition uint32) (ConsumerStats, error) {
 	if consumer == nil || consumer.store == nil {
@@ -62,9 +67,13 @@ func (consumer *GroupConsumer) Stats(topic api.TopicID, partition uint32) (Consu
 	if cursor == nil {
 		return ConsumerStats{CapturedAt: time.Now(), GroupID: consumer.groupID, Topic: topic, Partition: partition}, api.ErrInvalidArgument
 	}
-	cursor.operation.Lock()
-	defer cursor.operation.Unlock()
-	return consumer.assignmentStats(key, cursor.next, cursor.owner, consumer.generation)
+	if !cursor.operation.TryLock() {
+		return ConsumerStats{CapturedAt: time.Now(), GroupID: consumer.groupID, Topic: topic, Partition: partition}, api.ErrConcurrentOperation
+	}
+	next := cursor.next
+	owner := cursor.owner
+	cursor.operation.Unlock()
+	return consumer.assignmentStats(key, next, owner, consumer.generation)
 }
 
 func (consumer *Consumer) assignmentStats(key topicKey, next uint64, owner [16]byte, generation uint64) (ConsumerStats, error) {
