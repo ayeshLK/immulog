@@ -154,7 +154,7 @@ the estimates and zero disables a preflight. The runner records
 initial/final data size, free space, the churn interval, producer-rate controls,
 and the process open-file limit, and writes a machine-readable schema-v2
 `metrics.json` sidecar containing phase durations, counters, bounded samples,
-resource observations, aggregate and per-partition
+resource observations, skipped observer snapshots, aggregate and per-partition
 delivery records/bytes/rates and lag, oracle results, and latency bucket data.
 `--runs 3` automatically executes isolated runs and writes `runs.tsv`; it
 replaces a user-side shell loop. Rate sweeps similarly write `rates.tsv`.

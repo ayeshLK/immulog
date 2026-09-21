@@ -459,6 +459,20 @@ func TestGroupConsumerPollKeepsLeaseDuringSlowFetch(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	statsResult := make(chan error, 1)
+	go func() {
+		_, err := consumer.Stats(descriptor.ID, 0)
+		statsResult <- err
+	}()
+	select {
+	case err := <-statsResult:
+		if !errors.Is(err, api.ErrConcurrentOperation) {
+			t.Fatalf("stats during slow group poll = %v, want ErrConcurrentOperation", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		partition.mu.Unlock()
+		t.Fatal("stats blocked behind slow group poll")
+	}
 	time.Sleep(30 * time.Millisecond)
 	partition.mu.Unlock()
 
