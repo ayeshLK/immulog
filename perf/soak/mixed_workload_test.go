@@ -1288,6 +1288,9 @@ func groupLoop(ctx context.Context, handle *soakGroupHandle, topic api.TopicID, 
 				return
 			}
 			stats, statsErr := consumer.Stats(topic, partition)
+			if errors.Is(statsErr, api.ErrConcurrentOperation) {
+				metrics.consumerStatsSkipped.Add(1)
+			}
 			if statsErr != nil && !isExpectedSoakConsumerError(statsErr) {
 				report(fmt.Errorf("soak group stats partition %d: %w", partition, statsErr))
 				return

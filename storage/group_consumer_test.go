@@ -461,6 +461,45 @@ func TestGroupConsumerPollKeepsLeaseWhileWaitingForStoreAdmission(t *testing.T) 
 	}
 }
 
+func TestGroupConsumerStatsDoesNotBlockOnPartitionRead(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	descriptor, err := store.CreateTopic("stats-partition-lock", 1, PartitionOptions{BatchBytes: 4096, SegmentBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partition, err := store.OpenPartition(descriptor.ID, 0, PartitionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	members := []api.ConsumerGroupMember{{Subscriptions: []api.TopicPartition{{Topic: descriptor.ID, Partition: 0}}}}
+	consumer, err := store.OpenConsumerGroup(context.Background(), "stats-partition-lock", members, api.ConsumerGroupOptions{Start: api.GroupStartEarliest, ProgressTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	partition.mu.Lock()
+	statsResult := make(chan error, 1)
+	go func() {
+		_, err := consumer.Stats(descriptor.ID, 0)
+		statsResult <- err
+	}()
+	select {
+	case err := <-statsResult:
+		if !errors.Is(err, api.ErrConcurrentOperation) {
+			partition.mu.Unlock()
+			t.Fatalf("stats during partition lock = %v, want ErrConcurrentOperation", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		partition.mu.Unlock()
+		t.Fatal("stats blocked on partition read")
+	}
+	partition.mu.Unlock()
+}
+
 func TestGroupConsumerPollKeepsLeaseDuringSlowFetch(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {
