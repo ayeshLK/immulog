@@ -8,7 +8,9 @@ Start with the [README](README.md) for the project scope and quick start. The
 [usage guide](docs/usage.md) covers the public API, while the [production
 guide](docs/production.md) covers durability, recovery, capacity, retention,
 and operations. Read [Benchmark evidence](BENCHMARKS.md) before running or
-interpreting performance measurements. Please also follow the [Code of Conduct](CODE_OF_CONDUCT.md)
+interpreting performance measurements. Use the [soak validation guide](docs/soak-validation.md)
+for the staged regression and qualification workflow. Please also follow the
+[Code of Conduct](CODE_OF_CONDUCT.md)
 when participating in issues, pull requests, and reviews.
 
 ## Development setup
