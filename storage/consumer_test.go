@@ -265,6 +265,48 @@ func TestConsumerPollKeepsLeaseDuringSlowFetch(t *testing.T) {
 	}
 }
 
+func TestConsumerPollKeepsLeaseWhileWaitingForStoreAdmission(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	descriptor, err := store.CreateTopic("admission-wait", 1, PartitionOptions{BatchBytes: 4096, SegmentBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := store.OpenConsumer(context.Background(), "admission-wait", descriptor.ID, 0, api.ConsumerOptions{Start: api.GroupStartEarliest, ProgressTimeout: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store.mu.Lock()
+	pollResult := make(chan error, 1)
+	go func() {
+		_, err := consumer.Poll(context.Background(), api.FetchOptions{MaxRecords: 1, MaxBytes: 1024})
+		pollResult <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for consumer.admission.earliest.Load() == 0 {
+		if time.Now().After(deadline) {
+			store.mu.Unlock()
+			t.Fatal("poll did not begin admission")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(30 * time.Millisecond)
+	store.mu.Unlock()
+
+	select {
+	case err := <-pollResult:
+		if err != nil {
+			t.Fatalf("poll waiting for store admission = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("poll waiting for store admission did not complete")
+	}
+}
+
 func TestConsumerCommitKeepsLeaseDuringSlowDurableAppend(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

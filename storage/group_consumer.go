@@ -36,6 +36,7 @@ type GroupConsumer struct {
 	generation      uint64
 	fetch           api.FetchOptions
 	progressTimeout time.Duration
+	admission       consumerAdmission
 	membership      canonicalGroupMembership
 	members         map[[16]byte]*groupMember
 	cursors         map[topicKey]*groupCursor
@@ -243,7 +244,7 @@ func (s *Store) liveGroupConsumerLocked(groupID string, consumer *GroupConsumer,
 	}
 	now := time.Now()
 	for _, member := range consumer.members {
-		if member.inFlight == 0 && !now.Before(member.deadline) {
+		if member.inFlight == 0 && !now.Before(member.deadline) && !consumer.admission.startedBefore(member.deadline) {
 			return false, true
 		}
 	}
@@ -289,6 +290,8 @@ func (consumer *GroupConsumer) Poll(ctx context.Context, topic api.TopicID, part
 		ctx = context.Background()
 	}
 	key := topicKey{topic: topic, partition: partitionID}
+	admission := consumer.admission.begin()
+	defer consumer.admission.end(admission)
 	cursor, err := consumer.cursor(key)
 	if err != nil {
 		return api.FetchResult{}, err
@@ -356,6 +359,8 @@ func (consumer *GroupConsumer) Commit(ctx context.Context, topic api.TopicID, pa
 		ctx = context.Background()
 	}
 	key := topicKey{topic: topic, partition: partitionID}
+	admission := consumer.admission.begin()
+	defer consumer.admission.end(admission)
 	cursor, err := consumer.cursor(key)
 	if err != nil {
 		return err
@@ -510,7 +515,7 @@ func (consumer *GroupConsumer) activeCursorLocked(cursor *groupCursor) (*Partiti
 	}
 	now := time.Now()
 	for _, member := range consumer.members {
-		if member.inFlight == 0 && !now.Before(member.deadline) {
+		if member.inFlight == 0 && !now.Before(member.deadline) && !consumer.admission.startedBefore(member.deadline) {
 			delete(consumer.store.groupConsumers, consumer.groupID)
 			consumer.store.expiredGroups[consumer.groupID] = true
 			return nil, assignmentLost("member progress deadline expired")
