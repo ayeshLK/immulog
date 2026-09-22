@@ -39,7 +39,8 @@ type ConsumerStats struct {
 }
 
 // Stats returns a bounded snapshot for this single-key assignment. It returns
-// api.ErrConcurrentOperation when another operation is active.
+// api.ErrConcurrentOperation when another operation or required storage lock is
+// active.
 func (consumer *Consumer) Stats() (ConsumerStats, error) {
 	if consumer == nil || consumer.store == nil {
 		return ConsumerStats{}, api.ErrClosed
@@ -53,15 +54,17 @@ func (consumer *Consumer) Stats() (ConsumerStats, error) {
 }
 
 // Stats returns a bounded snapshot for one partition in this membership
-// snapshot. It returns api.ErrConcurrentOperation when another operation is
-// active. The caller selects the partition, so the method never allocates an
-// unbounded all-group diagnostic payload.
+// snapshot. It returns api.ErrConcurrentOperation when another operation or
+// required storage lock is active. The caller selects the partition, so the
+// method never allocates an unbounded all-group diagnostic payload.
 func (consumer *GroupConsumer) Stats(topic api.TopicID, partition uint32) (ConsumerStats, error) {
 	if consumer == nil || consumer.store == nil {
 		return ConsumerStats{}, api.ErrClosed
 	}
 	key := topicKey{topic: topic, partition: partition}
-	consumer.store.mu.Lock()
+	if !consumer.store.mu.TryLock() {
+		return ConsumerStats{CapturedAt: time.Now(), GroupID: consumer.groupID, Topic: topic, Partition: partition}, api.ErrConcurrentOperation
+	}
 	cursor := consumer.cursors[key]
 	consumer.store.mu.Unlock()
 	if cursor == nil {
@@ -80,7 +83,9 @@ func (consumer *Consumer) assignmentStats(key topicKey, next uint64, owner [16]b
 	capturedAt := time.Now()
 	stats := ConsumerStats{CapturedAt: capturedAt, GroupID: consumer.groupID, Topic: key.topic, Partition: key.partition, NextDelivery: next}
 	store := consumer.store
-	store.mu.Lock()
+	if !store.mu.TryLock() {
+		return stats, api.ErrConcurrentOperation
+	}
 	if consumer.closed || store.closed {
 		store.mu.Unlock()
 		return stats, api.ErrClosed
@@ -102,8 +107,18 @@ func (consumer *Consumer) assignmentStats(key topicKey, next uint64, owner [16]b
 	if !active {
 		return stats, nil
 	}
-	logStart, durableEnd, partitionActive := partitionBounds(partition)
-	if !partitionActive || !assignmentStillActive(store, consumer.groupID, key, consumer, generation, owner) {
+	logStart, durableEnd, partitionActive, err := partitionBounds(partition)
+	if err != nil {
+		return stats, err
+	}
+	if !partitionActive {
+		return stats, nil
+	}
+	stillActive, err := assignmentStillActive(store, consumer.groupID, key, consumer, generation, owner)
+	if err != nil {
+		return stats, err
+	}
+	if !stillActive {
 		return stats, nil
 	}
 	stats.LogStartOffset = logStart
@@ -120,7 +135,9 @@ func (consumer *GroupConsumer) assignmentStats(key topicKey, next uint64, owner 
 	capturedAt := time.Now()
 	stats := ConsumerStats{CapturedAt: capturedAt, GroupID: consumer.groupID, Topic: key.topic, Partition: key.partition, NextDelivery: next}
 	store := consumer.store
-	store.mu.Lock()
+	if !store.mu.TryLock() {
+		return stats, api.ErrConcurrentOperation
+	}
 	if consumer.closed || store.closed {
 		store.mu.Unlock()
 		return stats, api.ErrClosed
@@ -142,8 +159,18 @@ func (consumer *GroupConsumer) assignmentStats(key topicKey, next uint64, owner 
 	if !active {
 		return stats, nil
 	}
-	logStart, durableEnd, partitionActive := partitionBounds(partition)
-	if !partitionActive || !groupAssignmentStillActive(store, consumer.groupID, key, consumer, generation, owner) {
+	logStart, durableEnd, partitionActive, err := partitionBounds(partition)
+	if err != nil {
+		return stats, err
+	}
+	if !partitionActive {
+		return stats, nil
+	}
+	stillActive, err := groupAssignmentStillActive(store, consumer.groupID, key, consumer, generation, owner)
+	if err != nil {
+		return stats, err
+	}
+	if !stillActive {
 		return stats, nil
 	}
 	stats.LogStartOffset = logStart
@@ -156,31 +183,37 @@ func (consumer *GroupConsumer) assignmentStats(key topicKey, next uint64, owner 
 	return stats, nil
 }
 
-func partitionBounds(partition *Partition) (logStart, durableEnd uint64, active bool) {
-	partition.mu.RLock()
+func partitionBounds(partition *Partition) (logStart, durableEnd uint64, active bool, err error) {
+	if !partition.mu.TryRLock() {
+		return 0, 0, false, api.ErrConcurrentOperation
+	}
 	defer partition.mu.RUnlock()
 	if partition.closed || partition.closing || partition.unavailable || len(partition.segments) == 0 {
-		return 0, 0, false
+		return 0, 0, false, nil
 	}
-	return partition.segments[0].header.BaseOffset, partition.logEnd, true
+	return partition.segments[0].header.BaseOffset, partition.logEnd, true, nil
 }
 
-func assignmentStillActive(store *Store, groupID string, key topicKey, consumer *Consumer, generation uint64, owner [16]byte) bool {
-	store.mu.Lock()
+func assignmentStillActive(store *Store, groupID string, key topicKey, consumer *Consumer, generation uint64, owner [16]byte) (bool, error) {
+	if !store.mu.TryLock() {
+		return false, api.ErrConcurrentOperation
+	}
 	defer store.mu.Unlock()
 	group := store.offsetsState.groups[groupID]
 	return !store.closed && !store.closing.Load() && !store.offsetsUnavailable && group != nil && store.consumers[consumerMapKey(groupID, key)] == consumer &&
 		group.Generation == generation && group.AssignmentOwner[key] == owner && !consumer.expired &&
-		(consumer.deadline.IsZero() || time.Now().Before(consumer.deadline))
+		(consumer.deadline.IsZero() || time.Now().Before(consumer.deadline)), nil
 }
 
-func groupAssignmentStillActive(store *Store, groupID string, key topicKey, consumer *GroupConsumer, generation uint64, owner [16]byte) bool {
-	store.mu.Lock()
+func groupAssignmentStillActive(store *Store, groupID string, key topicKey, consumer *GroupConsumer, generation uint64, owner [16]byte) (bool, error) {
+	if !store.mu.TryLock() {
+		return false, api.ErrConcurrentOperation
+	}
 	defer store.mu.Unlock()
 	group := store.offsetsState.groups[groupID]
 	member := consumer.members[owner]
 	return !store.closed && !store.closing.Load() && !store.offsetsUnavailable && group != nil && member != nil && store.groupConsumers[groupID] == consumer &&
-		group.Generation == generation && group.AssignmentOwner[key] == owner && time.Now().Before(member.deadline)
+		group.Generation == generation && group.AssignmentOwner[key] == owner && time.Now().Before(member.deadline), nil
 }
 
 func offsetDistance(high, low uint64) uint64 {
