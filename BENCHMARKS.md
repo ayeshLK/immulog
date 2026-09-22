@@ -5,6 +5,9 @@ performance measurements. Results are dated, machine-specific evidence. They
 are not portable throughput guarantees and are not release thresholds unless a
 separate qualification record explicitly says otherwise.
 
+For a staged consumer-liveness and soak-validation workflow, see
+[Soak validation](docs/soak-validation.md).
+
 ## Benchmark inventory
 
 ### Durable append benchmarks
