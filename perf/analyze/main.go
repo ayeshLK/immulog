@@ -58,6 +58,8 @@ type rawLatency struct {
 
 type rawReport struct {
 	Version              uint32                     `json:"version"`
+	Completed            *bool                      `json:"completed"`
+	Failure              string                     `json:"failure"`
 	WarmupNanos          uint64                     `json:"warmup_nanos"`
 	MeasurementNanos     uint64                     `json:"measurement_nanos"`
 	TotalNanos           uint64                     `json:"total_nanos"`
@@ -85,6 +87,8 @@ type latencySummary struct {
 
 type analysis struct {
 	Input                string                    `json:"input"`
+	Completed            bool                      `json:"completed"`
+	Failure              string                    `json:"failure,omitempty"`
 	Version              uint32                    `json:"version"`
 	WarmupNanos          uint64                    `json:"warmup_nanos"`
 	MeasurementNanos     uint64                    `json:"measurement_nanos"`
@@ -134,8 +138,12 @@ func loadReport(path string) (rawReport, error) {
 
 func analyze(path string, report rawReport) analysis {
 	seconds := float64(report.MeasurementNanos) / 1e9
+	completed := true
+	if report.Completed != nil {
+		completed = *report.Completed
+	}
 	result := analysis{
-		Input: path, Version: report.Version, WarmupNanos: report.WarmupNanos, MeasurementNanos: report.MeasurementNanos,
+		Input: path, Completed: completed, Failure: report.Failure, Version: report.Version, WarmupNanos: report.WarmupNanos, MeasurementNanos: report.MeasurementNanos,
 		TotalNanos: report.TotalNanos, OfferedRecordsPerS: float64(report.Offered) / seconds,
 		AcknowledgedPerS:   float64(report.Acknowledged) / seconds,
 		AcknowledgedBytesS: float64(report.AckBytes) / seconds,
@@ -169,6 +177,14 @@ func analyze(path string, report rawReport) analysis {
 	}
 	for name, latency := range report.Latency {
 		result.Latency[name] = latencySummary{P50Nanos: bucket(latency.P50), P90Nanos: bucket(latency.P90), P95Nanos: bucket(latency.P95), P99Nanos: bucket(latency.P99), P999Nanos: bucket(latency.P999)}
+	}
+	if !result.Completed {
+		reason := "run did not complete"
+		if result.Failure != "" {
+			reason += ": " + result.Failure
+		}
+		result.Valid = false
+		result.Reasons = append(result.Reasons, reason)
 	}
 	if report.SamplesDropped != 0 {
 		result.Valid = false

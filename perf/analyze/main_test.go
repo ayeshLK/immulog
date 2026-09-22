@@ -78,6 +78,17 @@ func TestLoadReportRejectsUnsupportedOrZeroDuration(t *testing.T) {
 	}
 }
 
+func TestAnalyzeFlagsIncompleteRun(t *testing.T) {
+	completed := false
+	result := analyze("fixture", rawReport{
+		Version: 2, Completed: &completed, Failure: "assignment lost",
+		MeasurementNanos: 1_000_000_000, Oracles: map[string]json.RawMessage{"stable": {}},
+	})
+	if result.Valid || !strings.Contains(result.Reasons[0], "assignment lost") {
+		t.Fatalf("incomplete run = %#v", result)
+	}
+}
+
 func TestAnalyzeFlagsIncreasingBacklog(t *testing.T) {
 	result := analyze("fixture", rawReport{
 		Version: 2, MeasurementNanos: 1_000_000_000,

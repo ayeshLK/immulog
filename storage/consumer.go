@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ayeshLK/immulog/api"
@@ -31,6 +32,52 @@ const (
 	minConsumerProgressTimeout     = time.Millisecond
 	maxConsumerProgressTimeout     = 24 * time.Hour
 )
+
+var consumerAdmissionEpoch = time.Now()
+
+// consumerAdmission keeps a lease alive while an operation waits to acquire
+// store.mu. The earliest start is retained so a call that began before expiry
+// cannot be mistaken for a newly started idle operation.
+type consumerAdmission struct {
+	mu       sync.Mutex
+	pending  []int64
+	earliest atomic.Int64
+}
+
+func (admission *consumerAdmission) begin() int64 {
+	started := time.Since(consumerAdmissionEpoch).Nanoseconds()
+	admission.mu.Lock()
+	admission.pending = append(admission.pending, started)
+	earliest := admission.earliest.Load()
+	if earliest == 0 || started < earliest {
+		admission.earliest.Store(started)
+	}
+	admission.mu.Unlock()
+	return started
+}
+
+func (admission *consumerAdmission) end(started int64) {
+	admission.mu.Lock()
+	for index, pending := range admission.pending {
+		if pending == started {
+			admission.pending = append(admission.pending[:index], admission.pending[index+1:]...)
+			break
+		}
+	}
+	var earliest int64
+	for _, pending := range admission.pending {
+		if earliest == 0 || pending < earliest {
+			earliest = pending
+		}
+	}
+	admission.earliest.Store(earliest)
+	admission.mu.Unlock()
+}
+
+func (admission *consumerAdmission) startedBefore(deadline time.Time) bool {
+	started := admission.earliest.Load()
+	return started != 0 && started < deadline.Sub(consumerAdmissionEpoch).Nanoseconds()
+}
 
 // Consumer owns one same-process group assignment for one topic partition. A
 // later OpenConsumer for that key durably fences this handle before activating
@@ -47,6 +94,7 @@ type Consumer struct {
 	progressTimeout time.Duration
 
 	operation       sync.Mutex
+	admission       consumerAdmission
 	next            uint64
 	delivered       uint64
 	deadline        time.Time
@@ -200,6 +248,8 @@ func (consumer *Consumer) Poll(ctx context.Context, options api.FetchOptions) (a
 	if err := ctx.Err(); err != nil {
 		return api.FetchResult{NextOffset: consumer.next}, err
 	}
+	admission := consumer.admission.begin()
+	defer consumer.admission.end(admission)
 	if options.MaxRecords == 0 && options.MaxBytes == 0 {
 		if options.MaxWait != 0 {
 			wait := options.MaxWait
@@ -263,6 +313,8 @@ func (consumer *Consumer) Commit(ctx context.Context, next uint64) error {
 		return api.ErrConcurrentOperation
 	}
 	defer consumer.operation.Unlock()
+	admission := consumer.admission.begin()
+	defer consumer.admission.end(admission)
 	if err := consumer.store.acquireOffsetsAdmission(ctx); err != nil {
 		return err
 	}
@@ -380,7 +432,7 @@ func (consumer *Consumer) activePartitionLocked() (*Partition, error) {
 	if consumer.store.closing.Load() {
 		return nil, api.ErrClosing
 	}
-	if consumer.expired || (!consumer.operationActive && !consumer.deadline.IsZero() && !time.Now().Before(consumer.deadline)) {
+	if consumer.expired || (!consumer.operationActive && !consumer.deadline.IsZero() && !time.Now().Before(consumer.deadline) && !consumer.admission.startedBefore(consumer.deadline)) {
 		consumer.expired = true
 		consumer.store.expiredGroups[consumer.groupID] = true
 		delete(consumer.store.consumers, consumerMapKey(consumer.groupID, consumer.key))

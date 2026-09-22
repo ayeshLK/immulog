@@ -364,10 +364,22 @@ func TestMixedWorkloadSoak(t *testing.T) {
 
 	started := time.Now()
 	metrics.startMeasurement(started)
+	metricsFile := os.Getenv("IMMULOG_SOAK_METRICS_FILE")
+	metricsWritten := false
+	var failure error
+	defer func() {
+		if metricsFile != "" && !metricsWritten {
+			metrics.finishMeasurement(time.Now())
+			if err := writeSoakMetrics(metricsFile, metrics, oracles, time.Since(started), false, failure); err != nil {
+				t.Logf("write partial soak metrics: %v", err)
+			}
+		}
+	}()
 	soakContext, cancel := context.WithTimeout(context.Background(), duration)
 	defer cancel()
 	for {
 		if err := runSoakCycle(soakContext, store, fixture, oracles, metrics, checkpoint.Run, seed, &sequenceCounter, appendInterval, producerRate, churnInterval, reopenInterval, overloadPeriod, overloadWindow, stressCancellation); err != nil {
+			failure = err
 			t.Fatal(err)
 		}
 		for key, oracle := range oracles {
@@ -403,10 +415,11 @@ func TestMixedWorkloadSoak(t *testing.T) {
 	for key, oracle := range oracles {
 		t.Logf("oracle %s verified=%d expired=%d next=%d digest=%s", key, oracle.verifiedCount(), oracle.expiredCount(), oracle.nextOffset(), oracle.digestHex())
 	}
-	if path := os.Getenv("IMMULOG_SOAK_METRICS_FILE"); path != "" {
-		if err := writeSoakMetrics(path, metrics, oracles, time.Since(started)); err != nil {
+	if metricsFile != "" {
+		if err := writeSoakMetrics(metricsFile, metrics, oracles, time.Since(started), true, nil); err != nil {
 			t.Fatal(err)
 		}
+		metricsWritten = true
 	}
 }
 
@@ -451,6 +464,8 @@ type soakPartitionReport struct {
 
 type soakMetricsReport struct {
 	Version              uint32                         `json:"version"`
+	Completed            bool                           `json:"completed"`
+	Failure              string                         `json:"failure,omitempty"`
 	WarmupNanos          uint64                         `json:"warmup_nanos"`
 	MeasurementNanos     uint64                         `json:"measurement_nanos"`
 	TotalNanos           uint64                         `json:"total_nanos"`
@@ -489,7 +504,14 @@ type soakMetricsReport struct {
 	Oracles              map[string]soakOracleReport    `json:"oracles"`
 }
 
-func writeSoakMetrics(path string, metrics *soakMetrics, oracles map[string]*soakOracle, elapsed time.Duration) error {
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func writeSoakMetrics(path string, metrics *soakMetrics, oracles map[string]*soakOracle, elapsed time.Duration, completed bool, failure error) error {
 	lagSamples := metrics.lagSamples.Load()
 	averageDeliveryLag, averageCommitLag := uint64(0), uint64(0)
 	if lagSamples != 0 {
@@ -512,6 +534,8 @@ func writeSoakMetrics(path string, metrics *soakMetrics, oracles map[string]*soa
 	}
 	report := soakMetricsReport{
 		Version:              2,
+		Completed:            completed,
+		Failure:              errorString(failure),
 		WarmupNanos:          metrics.warmupNanos,
 		MeasurementNanos:     uint64(measurement),
 		TotalNanos:           uint64(elapsed),
@@ -1211,7 +1235,7 @@ func groupLoop(ctx context.Context, handle *soakGroupHandle, topic api.TopicID, 
 						partitionMetrics.assignmentLost.Add(1)
 						replacement, waitErr := waitForSoakConsumerReplacement(ctx, handle, consumer)
 						if waitErr != nil {
-							report(fmt.Errorf("soak group assignment lost on partition %d without replacement: %w (%s)", partition, waitErr, progress.diagnostic(partition)))
+							report(fmt.Errorf("soak group assignment lost on partition %d: %v; replacement was not installed: %w (%s)", partition, err, waitErr, progress.diagnostic(partition)))
 							return
 						}
 						consumer = replacement
@@ -1246,7 +1270,7 @@ func groupLoop(ctx context.Context, handle *soakGroupHandle, topic api.TopicID, 
 						partitionMetrics.assignmentLost.Add(1)
 						replacement, waitErr := waitForSoakConsumerReplacement(ctx, handle, consumer)
 						if waitErr != nil {
-							report(fmt.Errorf("soak group assignment lost during commit on partition %d without replacement: %w (%s)", partition, waitErr, progress.diagnostic(partition)))
+							report(fmt.Errorf("soak group assignment lost during commit on partition %d: %v; replacement was not installed: %w (%s)", partition, commitErr, waitErr, progress.diagnostic(partition)))
 							return
 						}
 						consumer = replacement
