@@ -15,6 +15,7 @@
 package soak
 
 import (
+	"crypto/sha256"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -59,6 +60,22 @@ func TestSoakOracleObserversDoNotBlock(t *testing.T) {
 		t.Fatalf("oracle delivery while locked = %v, want ErrConcurrentOperation", err)
 	}
 	oracle.mu.Unlock()
+}
+
+func TestSoakOracleStoresPayloadDigest(t *testing.T) {
+	key := []byte("key")
+	value := []byte("payload")
+	oracle := &soakOracle{pending: make(map[string]*soakExpected)}
+	if err := oracle.offer(key, value); err != nil {
+		t.Fatal(err)
+	}
+	pending := oracle.pending[string(key)]
+	if pending == nil {
+		t.Fatal("oracle expectation was not stored")
+	}
+	if pending.valueBytes != len(value) || pending.valueDigest != sha256.Sum256(value) {
+		t.Fatalf("stored payload identity = (%d, %x)", pending.valueBytes, pending.valueDigest)
+	}
 }
 
 func TestSoakLatencyBucketsIncludeLongTails(t *testing.T) {

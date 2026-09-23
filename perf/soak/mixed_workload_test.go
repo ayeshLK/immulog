@@ -75,7 +75,8 @@ type soakFixture struct {
 }
 
 type soakExpected struct {
-	value                   []byte
+	valueDigest             [sha256.Size]byte
+	valueBytes              int
 	offeredAt               time.Time
 	acknowledgedAt          time.Time
 	observedAt              time.Time
@@ -1546,7 +1547,7 @@ func (oracle *soakOracle) offer(key, value []byte) error {
 	if _, exists := oracle.pending[id]; exists {
 		return oracle.setErrorLocked(fmt.Errorf("duplicate offered soak record ID %q", id))
 	}
-	oracle.pending[id] = &soakExpected{value: append([]byte(nil), value...), offeredAt: time.Now()}
+	oracle.pending[id] = &soakExpected{valueDigest: sha256.Sum256(value), valueBytes: len(value), offeredAt: time.Now()}
 	return nil
 }
 
@@ -1560,7 +1561,7 @@ func (oracle *soakOracle) acknowledge(key, value []byte, offset uint64) error {
 	if pending == nil {
 		return oracle.setErrorLocked(fmt.Errorf("acknowledged soak record %q was not pending", key))
 	}
-	if !bytes.Equal(pending.value, value) {
+	if pending.valueBytes != len(value) || pending.valueDigest != sha256.Sum256(value) {
 		return oracle.setErrorLocked(fmt.Errorf("acknowledged soak record %q changed payload", key))
 	}
 	pending.acked = true
@@ -1668,7 +1669,7 @@ func (oracle *soakOracle) observe(record api.Record) error {
 		return oracle.err
 	}
 	if pending := oracle.pending[string(record.Key)]; pending != nil {
-		if !bytes.Equal(pending.value, record.Value) {
+		if pending.valueBytes != len(record.Value) || pending.valueDigest != sha256.Sum256(record.Value) {
 			return oracle.setErrorLocked(fmt.Errorf("oracle payload mismatch at offset %d", record.Offset))
 		}
 		pending.observed = true
