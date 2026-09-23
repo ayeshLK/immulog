@@ -15,10 +15,12 @@
 package soak
 
 import (
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ayeshLK/immulog/api"
 	"github.com/ayeshLK/immulog/storage"
 )
 
@@ -43,6 +45,20 @@ func TestSoakMetricsMeasurementAndSampleCap(t *testing.T) {
 	if duration := metrics.measurementDuration(); duration <= 0 || duration > time.Second {
 		t.Fatalf("measurement duration = %s", duration)
 	}
+}
+
+func TestSoakOracleObserversDoNotBlock(t *testing.T) {
+	oracle := &soakOracle{}
+	oracle.mu.Lock()
+	if err := oracle.commit(1); !errors.Is(err, api.ErrConcurrentOperation) {
+		oracle.mu.Unlock()
+		t.Fatalf("oracle commit while locked = %v, want ErrConcurrentOperation", err)
+	}
+	if err := oracle.delivery([]byte("key"), 0); !errors.Is(err, api.ErrConcurrentOperation) {
+		oracle.mu.Unlock()
+		t.Fatalf("oracle delivery while locked = %v, want ErrConcurrentOperation", err)
+	}
+	oracle.mu.Unlock()
 }
 
 func TestSoakLatencyBucketsIncludeLongTails(t *testing.T) {

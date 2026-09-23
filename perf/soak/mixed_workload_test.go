@@ -190,6 +190,8 @@ type soakMetrics struct {
 	schedulerLate          atomic.Uint64
 	maxSchedulerLateness   atomic.Uint64
 	consumerStatsSkipped   atomic.Uint64
+	oracleDeliverySkipped  atomic.Uint64
+	oracleCommitSkipped    atomic.Uint64
 	offered                atomic.Uint64
 	acknowledged           atomic.Uint64
 	unknown                atomic.Uint64
@@ -463,45 +465,47 @@ type soakPartitionReport struct {
 }
 
 type soakMetricsReport struct {
-	Version              uint32                         `json:"version"`
-	Completed            bool                           `json:"completed"`
-	Failure              string                         `json:"failure,omitempty"`
-	WarmupNanos          uint64                         `json:"warmup_nanos"`
-	MeasurementNanos     uint64                         `json:"measurement_nanos"`
-	TotalNanos           uint64                         `json:"total_nanos"`
-	Phases               []soakPhaseReport              `json:"phases"`
-	SampleIntervalNanos  uint64                         `json:"sample_interval_nanos"`
-	SamplesDropped       uint64                         `json:"samples_dropped"`
-	SchedulerLate        uint64                         `json:"scheduler_late"`
-	MaxSchedulerLateness uint64                         `json:"max_scheduler_lateness_nanos"`
-	ConsumerStatsSkipped uint64                         `json:"consumer_stats_skipped"`
-	Samples              []soakSample                   `json:"samples"`
-	Profile              string                         `json:"profile"`
-	Offered              uint64                         `json:"offered"`
-	Acknowledged         uint64                         `json:"acknowledged"`
-	Unknown              uint64                         `json:"unknown"`
-	KnownRejected        uint64                         `json:"known_rejected"`
-	Cancelled            uint64                         `json:"cancelled"`
-	OverloadCalls        uint64                         `json:"overload_calls"`
-	AcknowledgedBytes    uint64                         `json:"acknowledged_bytes"`
-	DeliveredBytes       uint64                         `json:"delivered_payload_bytes"`
-	MaxGoroutines        uint64                         `json:"max_goroutines"`
-	MaxOpenFiles         uint64                         `json:"max_open_files"`
-	MaxHeapBytes         uint64                         `json:"max_heap_bytes"`
-	MaxRSSBytes          uint64                         `json:"max_rss_bytes"`
-	GCycles              uint64                         `json:"gc_cycles"`
-	ProcessReadBytes     uint64                         `json:"process_read_bytes"`
-	ProcessWriteBytes    uint64                         `json:"process_write_bytes"`
-	ProcessUserTicks     uint64                         `json:"process_user_ticks"`
-	ProcessSystemTicks   uint64                         `json:"process_system_ticks"`
-	LagSamples           uint64                         `json:"lag_samples"`
-	AverageDeliveryLag   uint64                         `json:"average_delivery_lag"`
-	MaxDeliveryLag       uint64                         `json:"max_delivery_lag"`
-	AverageCommitLag     uint64                         `json:"average_commit_lag"`
-	MaxCommitLag         uint64                         `json:"max_commit_lag"`
-	Latency              map[string]soakLatencyReport   `json:"latency"`
-	Partitions           map[string]soakPartitionReport `json:"partitions"`
-	Oracles              map[string]soakOracleReport    `json:"oracles"`
+	Version               uint32                         `json:"version"`
+	Completed             bool                           `json:"completed"`
+	Failure               string                         `json:"failure,omitempty"`
+	WarmupNanos           uint64                         `json:"warmup_nanos"`
+	MeasurementNanos      uint64                         `json:"measurement_nanos"`
+	TotalNanos            uint64                         `json:"total_nanos"`
+	Phases                []soakPhaseReport              `json:"phases"`
+	SampleIntervalNanos   uint64                         `json:"sample_interval_nanos"`
+	SamplesDropped        uint64                         `json:"samples_dropped"`
+	SchedulerLate         uint64                         `json:"scheduler_late"`
+	MaxSchedulerLateness  uint64                         `json:"max_scheduler_lateness_nanos"`
+	ConsumerStatsSkipped  uint64                         `json:"consumer_stats_skipped"`
+	OracleDeliverySkipped uint64                         `json:"oracle_delivery_skipped"`
+	OracleCommitSkipped   uint64                         `json:"oracle_commit_skipped"`
+	Samples               []soakSample                   `json:"samples"`
+	Profile               string                         `json:"profile"`
+	Offered               uint64                         `json:"offered"`
+	Acknowledged          uint64                         `json:"acknowledged"`
+	Unknown               uint64                         `json:"unknown"`
+	KnownRejected         uint64                         `json:"known_rejected"`
+	Cancelled             uint64                         `json:"cancelled"`
+	OverloadCalls         uint64                         `json:"overload_calls"`
+	AcknowledgedBytes     uint64                         `json:"acknowledged_bytes"`
+	DeliveredBytes        uint64                         `json:"delivered_payload_bytes"`
+	MaxGoroutines         uint64                         `json:"max_goroutines"`
+	MaxOpenFiles          uint64                         `json:"max_open_files"`
+	MaxHeapBytes          uint64                         `json:"max_heap_bytes"`
+	MaxRSSBytes           uint64                         `json:"max_rss_bytes"`
+	GCycles               uint64                         `json:"gc_cycles"`
+	ProcessReadBytes      uint64                         `json:"process_read_bytes"`
+	ProcessWriteBytes     uint64                         `json:"process_write_bytes"`
+	ProcessUserTicks      uint64                         `json:"process_user_ticks"`
+	ProcessSystemTicks    uint64                         `json:"process_system_ticks"`
+	LagSamples            uint64                         `json:"lag_samples"`
+	AverageDeliveryLag    uint64                         `json:"average_delivery_lag"`
+	MaxDeliveryLag        uint64                         `json:"max_delivery_lag"`
+	AverageCommitLag      uint64                         `json:"average_commit_lag"`
+	MaxCommitLag          uint64                         `json:"max_commit_lag"`
+	Latency               map[string]soakLatencyReport   `json:"latency"`
+	Partitions            map[string]soakPartitionReport `json:"partitions"`
+	Oracles               map[string]soakOracleReport    `json:"oracles"`
 }
 
 func errorString(err error) string {
@@ -533,45 +537,47 @@ func writeSoakMetrics(path string, metrics *soakMetrics, oracles map[string]*soa
 		cleanup = 0
 	}
 	report := soakMetricsReport{
-		Version:              2,
-		Completed:            completed,
-		Failure:              errorString(failure),
-		WarmupNanos:          metrics.warmupNanos,
-		MeasurementNanos:     uint64(measurement),
-		TotalNanos:           uint64(elapsed),
-		Phases:               []soakPhaseReport{{Name: "measure", DurationNanos: uint64(measurement)}, {Name: "drain", DurationNanos: uint64(drain)}, {Name: "verify", DurationNanos: uint64(verify)}, {Name: "cleanup", DurationNanos: uint64(cleanup)}},
-		SampleIntervalNanos:  uint64(metrics.sampleIntervalNanos),
-		SamplesDropped:       samplesDropped,
-		SchedulerLate:        metrics.schedulerLate.Load(),
-		MaxSchedulerLateness: metrics.maxSchedulerLateness.Load(),
-		ConsumerStatsSkipped: metrics.consumerStatsSkipped.Load(),
-		Samples:              samples,
-		Profile:              os.Getenv("IMMULOG_SOAK_PROFILE"),
-		Offered:              metrics.offered.Load(),
-		Acknowledged:         metrics.acknowledged.Load(),
-		Unknown:              metrics.unknown.Load(),
-		KnownRejected:        metrics.knownRejected.Load(),
-		Cancelled:            metrics.cancelled.Load(),
-		OverloadCalls:        metrics.overloadCalls.Load(),
-		AcknowledgedBytes:    metrics.acknowledgedBytes.Load(),
-		DeliveredBytes:       metrics.deliveredBytes.Load(),
-		MaxGoroutines:        metrics.maxGoroutines.Load(),
-		MaxOpenFiles:         metrics.maxOpenFiles.Load(),
-		MaxHeapBytes:         metrics.maxHeapBytes.Load(),
-		MaxRSSBytes:          metrics.maxRSSBytes.Load(),
-		GCycles:              metrics.gcCycles.Load(),
-		ProcessReadBytes:     metrics.processReadBytes.Load(),
-		ProcessWriteBytes:    metrics.processWriteBytes.Load(),
-		ProcessUserTicks:     metrics.processUserTicks.Load(),
-		ProcessSystemTicks:   metrics.processSystemTicks.Load(),
-		LagSamples:           lagSamples,
-		AverageDeliveryLag:   averageDeliveryLag,
-		MaxDeliveryLag:       metrics.maxDeliveryLag.Load(),
-		AverageCommitLag:     averageCommitLag,
-		MaxCommitLag:         metrics.maxCommitLag.Load(),
-		Latency:              make(map[string]soakLatencyReport),
-		Partitions:           make(map[string]soakPartitionReport, soakPartitionCount),
-		Oracles:              make(map[string]soakOracleReport, len(oracles)),
+		Version:               2,
+		Completed:             completed,
+		Failure:               errorString(failure),
+		WarmupNanos:           metrics.warmupNanos,
+		MeasurementNanos:      uint64(measurement),
+		TotalNanos:            uint64(elapsed),
+		Phases:                []soakPhaseReport{{Name: "measure", DurationNanos: uint64(measurement)}, {Name: "drain", DurationNanos: uint64(drain)}, {Name: "verify", DurationNanos: uint64(verify)}, {Name: "cleanup", DurationNanos: uint64(cleanup)}},
+		SampleIntervalNanos:   uint64(metrics.sampleIntervalNanos),
+		SamplesDropped:        samplesDropped,
+		SchedulerLate:         metrics.schedulerLate.Load(),
+		MaxSchedulerLateness:  metrics.maxSchedulerLateness.Load(),
+		ConsumerStatsSkipped:  metrics.consumerStatsSkipped.Load(),
+		OracleDeliverySkipped: metrics.oracleDeliverySkipped.Load(),
+		OracleCommitSkipped:   metrics.oracleCommitSkipped.Load(),
+		Samples:               samples,
+		Profile:               os.Getenv("IMMULOG_SOAK_PROFILE"),
+		Offered:               metrics.offered.Load(),
+		Acknowledged:          metrics.acknowledged.Load(),
+		Unknown:               metrics.unknown.Load(),
+		KnownRejected:         metrics.knownRejected.Load(),
+		Cancelled:             metrics.cancelled.Load(),
+		OverloadCalls:         metrics.overloadCalls.Load(),
+		AcknowledgedBytes:     metrics.acknowledgedBytes.Load(),
+		DeliveredBytes:        metrics.deliveredBytes.Load(),
+		MaxGoroutines:         metrics.maxGoroutines.Load(),
+		MaxOpenFiles:          metrics.maxOpenFiles.Load(),
+		MaxHeapBytes:          metrics.maxHeapBytes.Load(),
+		MaxRSSBytes:           metrics.maxRSSBytes.Load(),
+		GCycles:               metrics.gcCycles.Load(),
+		ProcessReadBytes:      metrics.processReadBytes.Load(),
+		ProcessWriteBytes:     metrics.processWriteBytes.Load(),
+		ProcessUserTicks:      metrics.processUserTicks.Load(),
+		ProcessSystemTicks:    metrics.processSystemTicks.Load(),
+		LagSamples:            lagSamples,
+		AverageDeliveryLag:    averageDeliveryLag,
+		MaxDeliveryLag:        metrics.maxDeliveryLag.Load(),
+		AverageCommitLag:      averageCommitLag,
+		MaxCommitLag:          metrics.maxCommitLag.Load(),
+		Latency:               make(map[string]soakLatencyReport),
+		Partitions:            make(map[string]soakPartitionReport, soakPartitionCount),
+		Oracles:               make(map[string]soakOracleReport, len(oracles)),
 	}
 	latencies := []struct {
 		name       string
@@ -1248,8 +1254,12 @@ func groupLoop(ctx context.Context, handle *soakGroupHandle, topic api.TopicID, 
 			progress.lastPollCompleted[partition].Store(time.Now().UnixNano())
 			partitionMetrics.pollRecords.Add(uint64(len(result.Records)))
 			if err := validateSoakDelivery(result, topic, partition, oracles[soakPartitionKey(soakStableTopic, partition)]); err != nil {
-				report(err)
-				return
+				if errors.Is(err, api.ErrConcurrentOperation) {
+					metrics.oracleDeliverySkipped.Add(uint64(len(result.Records)))
+				} else {
+					report(err)
+					return
+				}
 			}
 			deliveredBytes := soakRecordPayloadBytes(result.Records)
 			partitionMetrics.deliveredRecords.Add(uint64(len(result.Records)))
@@ -1284,8 +1294,12 @@ func groupLoop(ctx context.Context, handle *soakGroupHandle, topic api.TopicID, 
 			partitionMetrics.commitRecords.Add(uint64(len(result.Records)))
 			oracle := oracles[soakPartitionKey(soakStableTopic, partition)]
 			if err := oracle.commit(result.NextOffset); err != nil {
-				report(err)
-				return
+				if errors.Is(err, api.ErrConcurrentOperation) {
+					metrics.oracleCommitSkipped.Add(1)
+				} else {
+					report(err)
+					return
+				}
 			}
 			stats, statsErr := consumer.Stats(topic, partition)
 			if errors.Is(statsErr, api.ErrConcurrentOperation) {
@@ -1690,7 +1704,9 @@ func (oracle *soakOracle) hasUnverifiedAcknowledgement() bool {
 }
 
 func (oracle *soakOracle) commit(next uint64) error {
-	oracle.mu.Lock()
+	if !oracle.mu.TryLock() {
+		return api.ErrConcurrentOperation
+	}
 	defer oracle.mu.Unlock()
 	if oracle.err != nil {
 		return oracle.err
@@ -1703,7 +1719,9 @@ func (oracle *soakOracle) commit(next uint64) error {
 }
 
 func (oracle *soakOracle) delivery(key []byte, offset uint64) error {
-	oracle.mu.Lock()
+	if !oracle.mu.TryLock() {
+		return api.ErrConcurrentOperation
+	}
 	defer oracle.mu.Unlock()
 	if oracle.err != nil {
 		return oracle.err
