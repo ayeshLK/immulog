@@ -73,8 +73,8 @@ Soak evidence must use a dedicated data directory and preserve the run
 artifacts. `metrics.json` includes outcome counters, oracle results, lag,
 RSS/heap/goroutine/FD observations, process I/O and CPU ticks, latency
 histograms, aggregate/per-partition delivered payload bytes and rates, and
-bounded periodic backlog/resource samples, skipped observer snapshots, and
-completion/failure status. Schema version 2 records optional warmup duration, separates measurement
+bounded periodic backlog/resource samples, skipped observer/oracle checks,
+and completion/failure status. Schema version 2 records optional warmup duration, separates measurement
 duration from total cleanup time, and records measure, drain,
 verify, and cleanup phases. Ingress `acknowledged_bytes` and consumer
 `delivered_payload_bytes` count record `Value` bytes only; keys and on-disk
