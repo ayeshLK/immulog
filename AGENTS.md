@@ -13,17 +13,36 @@ checkpoint and next steps. Keep future metadata, consumer, retention, and
 ingress work within the planned package boundaries; do not add network or
 replication code to this slice.
 
+The `Store` owns the canonical directory, stable `LOCK`, catalog and consumer
+offset system partitions, user partitions, retention, snapshots, and disk
+admission. Catalog metadata is itself an append-only system log. Each partition
+uses bounded multi-producer ingress with one terminal durable writer; segments
+are authoritative, while indexes, snapshots, and live-tail caches are
+rebuildable. Managed consumers are same-process, at-least-once assignments
+with durable commits and fencing.
+
 ## Build, Test, and Development Commands
+
+This is a single Go 1.26 module using the standard Go toolchain; there is no
+separate build system or lint configuration. Linux is the only currently
+qualified platform because locking and disk-pressure implementations are
+Linux-specific.
 
 Run these from the repository root:
 
 ```sh
-go test ./...          # run all package tests
-go vet ./...           # report suspicious Go constructs
-go test -race ./...   # exercise tests with the race detector
 gofmt -w api/*.go storage/*.go perf/benchmarks/*.go perf/soak/*.go
-go test ./storage -run TestName
+go mod tidy
+go vet ./...
+go test -shuffle=on ./...
+go test -race ./...
+go test -covermode=atomic -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out
 ```
+
+Use `go test ./storage -run TestName` for a focused test. For concurrency
+regressions, repeat the focused test with `-count` and use `-race`; avoid
+sleep-only assertions.
 
 Long-running or opt-in checks:
 
@@ -51,7 +70,9 @@ consumer membership replacement. Prefer `perf/soak/run.sh` for
 long runs because it records environment, resource guardrails, logs,
 checkpoints, and `metrics.json`. Use `--runs` for isolated repeated evidence
 runs and `--rate-sweep` for isolated offered-rate runs; do not wrap the runner
-in a user-side shell loop.
+in a user-side shell loop. Explicit `--data-dir` cannot be combined with
+`--runs`. Benchmark qualification rejects dirty worktrees unless `--allow-dirty`
+is supplied.
 
 ### Performance and soak evidence
 
@@ -113,22 +134,25 @@ inputs at package boundaries, and document exported types and methods.
 ## Testing Guidelines
 
 Tests use Go's standard `testing` package and should be named
-`Test<TypeOrBehavior>`. Add correctness regression tests beside the
-implementation, especially for malformed bytes, CRC/checksum failures, offset
-continuity, reopen/recovery behavior, locking, and nil-versus-empty payload
-semantics. Keep benchmarks in `perf/benchmarks` and opt-in long-running soak
+`Test<TypeOrBehavior>`. Add deterministic correctness regression tests beside
+the implementation, especially for malformed bytes, CRC/checksum failures,
+offset continuity, reopen/recovery behavior, locking, and nil-versus-empty
+payload semantics. Storage tests use `t.TempDir()` and never write to a real
+user data directory; use bounded deadlines and explicit barriers for
+concurrency. Keep benchmarks in `perf/benchmarks` and opt-in long-running soak
 workloads in `perf/soak`; they must use public package APIs rather than
-production-private test seams. Run the full test, vet, and race commands before
-submitting changes.
+production-private test seams. Run formatting, module tidy, vet, shuffled tests,
+race tests, and coverage before submitting changes.
 
 ## Commit & Pull Request Guidelines
 
-Use concise, imperative commit subjects (for example, `storage: validate
-segment recovery`) and keep unrelated changes separate. Pull requests should
-explain the behavioral or format change, identify affected packages, link any
-related issue or plan section, and include the exact verification commands
-run. Call out compatibility, durability, recovery, or on-disk format impact;
-include focused test details when changing storage behavior.
+Use concise imperative Conventional Commit subjects such as `fix: ...`,
+`feat: ...`, or `test: ...`; keep unrelated changes separate. Pull requests
+should explain observable behavior, affected packages and invariants, relevant
+plan sections, and the exact validation commands run. Call out compatibility,
+durability, recovery, or on-disk format impact; include focused test details
+when changing storage behavior. Pin third-party GitHub Actions to full commit
+SHAs and retain least-privilege permissions.
 
 ## Safety & Configuration Notes
 
@@ -159,11 +183,11 @@ see `disk_pressure_test.go` for the pattern.
 ## CI/CD and Repository Automation
 
 Pull requests and pushes to `main` run `.github/workflows/ci.yml` on Linux with
-Go 1.26, formatting, module-tidy, vet, shuffled tests, race tests, and package
-coverage. Fuzzing and performance evidence are manual workflows; use
-`BENCHMARKS.md` for performance commands, environment capture, and
-interpretation, and use the opt-in soak settings documented above rather than
-running the soak in ordinary CI. Linux is the only currently qualified
+Go 1.26, source copyright-header checks, formatting, module-tidy, vet, shuffled
+tests, race tests, and package coverage. Fuzzing and performance evidence are
+manual workflows; use `BENCHMARKS.md` for performance commands, environment
+capture, and interpretation; use the opt-in soak settings documented above
+instead of running the soak in ordinary CI. Linux is the only currently qualified
 platform, so do not add a cross-platform matrix without equivalent lock and
 disk-pressure implementations.
 
@@ -180,6 +204,7 @@ freezing the eventual v1 contract. The ingress adapter uses the released
 subject to the same adapter, durability, cancellation, lifecycle, and
 performance requalification gates.
 
-`PROGRESS.md` and `DEPENDENCY_AUDIT.md` are local working notes and must not be
-staged or committed. Confirm both remain excluded before using broad staging
-commands.
+`PROGRESS.md` and `DEPENDENCY_AUDIT.md` are intentionally ignored local
+working notes and must not be staged or committed. `coverage.out` and local
+benchmark output are also not commit artifacts. Confirm these remain excluded
+before using broad staging commands.
