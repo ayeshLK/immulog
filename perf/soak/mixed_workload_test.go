@@ -94,7 +94,12 @@ type soakTiming struct {
 }
 
 type soakOracle struct {
-	mu             sync.Mutex
+	mu sync.Mutex
+	// consumed marks the partitions a consumer group actually polls. Only
+	// those oracles retain delivery timings, because delivery is what drains
+	// them; an unconsumed partition would otherwise keep one entry per
+	// acknowledged record for the whole run.
+	consumed       bool
 	topic          api.TopicID
 	partition      uint32
 	seed           uint64
@@ -109,8 +114,15 @@ type soakOracle struct {
 	metrics        *soakMetrics
 	verified       uint64
 	expired        uint64
-	committed      uint64
-	err            error
+	// skippedByRetention counts durable offsets retention retired before the
+	// scanner ever verified them. It is distinct from expired, which counts
+	// only pending acknowledged records purged early; a fast-retaining topic
+	// can advance oracle.next past a scanner that never even got to look, with
+	// nothing pending to expire, which used to be invisible except by
+	// subtracting verified from next by hand.
+	skippedByRetention uint64
+	committed          uint64
+	err                error
 }
 
 type soakPartitionMetrics struct {
@@ -416,7 +428,7 @@ func TestMixedWorkloadSoak(t *testing.T) {
 	}
 	t.Logf("mixed soak completed profile=%s duration=%s run=%d seed=0x%x %s", profile, duration, checkpoint.Run, seed, metrics.summary())
 	for key, oracle := range oracles {
-		t.Logf("oracle %s verified=%d expired=%d next=%d digest=%s", key, oracle.verifiedCount(), oracle.expiredCount(), oracle.nextOffset(), oracle.digestHex())
+		t.Logf("oracle %s verified=%d expired=%d skipped_by_retention=%d next=%d digest=%s", key, oracle.verifiedCount(), oracle.expiredCount(), oracle.skippedByRetentionCount(), oracle.nextOffset(), oracle.digestHex())
 	}
 	if metricsFile != "" {
 		if err := writeSoakMetrics(metricsFile, metrics, oracles, time.Since(started), true, nil); err != nil {
@@ -439,10 +451,11 @@ type soakLatencyReport struct {
 }
 
 type soakOracleReport struct {
-	Verified uint64 `json:"verified"`
-	Expired  uint64 `json:"expired"`
-	Next     uint64 `json:"next"`
-	Digest   string `json:"digest"`
+	Verified           uint64 `json:"verified"`
+	Expired            uint64 `json:"expired"`
+	SkippedByRetention uint64 `json:"skipped_by_retention"`
+	Next               uint64 `json:"next"`
+	Digest             string `json:"digest"`
 }
 
 type soakPartitionReport struct {
@@ -618,10 +631,11 @@ func writeSoakMetrics(path string, metrics *soakMetrics, oracles map[string]*soa
 	}
 	for key, oracle := range oracles {
 		report.Oracles[key] = soakOracleReport{
-			Verified: oracle.verifiedCount(),
-			Expired:  oracle.expiredCount(),
-			Next:     oracle.nextOffset(),
-			Digest:   oracle.digestHex(),
+			Verified:           oracle.verifiedCount(),
+			Expired:            oracle.expiredCount(),
+			SkippedByRetention: oracle.skippedByRetentionCount(),
+			Next:               oracle.nextOffset(),
+			Digest:             oracle.digestHex(),
 		}
 	}
 	data, err := json.MarshalIndent(report, "", "  ")
@@ -906,7 +920,8 @@ func newSoakOracles(fixture soakFixture, checkpoint soakCheckpoint, seed, run ui
 				next = stats.LogStartOffset
 			}
 			oracles[key] = &soakOracle{
-				topic: topic.id, partition: partition, seed: seed, run: run, next: next,
+				consumed: topic.name == soakStableTopic,
+				topic:    topic.id, partition: partition, seed: seed, run: run, next: next,
 				lastL: stats.LogStartOffset, lastH: stats.DurableEnd,
 				pending: make(map[string]*soakExpected), lastSequences: make(map[uint32]uint64), deliveryTiming: make(map[uint64]soakTiming), digest: sha256.New(),
 			}
@@ -1568,7 +1583,9 @@ func (oracle *soakOracle) acknowledge(key, value []byte, offset uint64) error {
 	pending.acknowledgedAt = time.Now()
 	pending.offset = offset
 	if pending.deliveredAt.IsZero() {
-		oracle.deliveryTiming[offset] = soakTiming{offeredAt: pending.offeredAt, acknowledgedAt: pending.acknowledgedAt}
+		if oracle.consumed {
+			oracle.deliveryTiming[offset] = soakTiming{offeredAt: pending.offeredAt, acknowledgedAt: pending.acknowledgedAt}
+		}
 	} else if !pending.deliveryLatencyRecorded {
 		oracle.recordDeliveryLatencyLocked(pending.offeredAt, pending.acknowledgedAt, pending.deliveredAt)
 		pending.deliveryLatencyRecorded = true
@@ -1648,6 +1665,7 @@ func (oracle *soakOracle) updateBounds(logStart, durableEnd uint64) error {
 	}
 	oracle.lastL, oracle.lastH = logStart, durableEnd
 	if oracle.next < logStart {
+		oracle.skippedByRetention += logStart - oracle.next
 		for id, pending := range oracle.pending {
 			if pending.acked && pending.offset < logStart {
 				delete(oracle.pending, id)
@@ -1786,6 +1804,12 @@ func (oracle *soakOracle) expiredCount() uint64 {
 	oracle.mu.Lock()
 	defer oracle.mu.Unlock()
 	return oracle.expired
+}
+
+func (oracle *soakOracle) skippedByRetentionCount() uint64 {
+	oracle.mu.Lock()
+	defer oracle.mu.Unlock()
+	return oracle.skippedByRetention
 }
 
 func (oracle *soakOracle) digestHex() string {
