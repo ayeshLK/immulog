@@ -229,6 +229,33 @@ incomplete final tail may be truncated. Retention advances the durable log-start
 boundary before deleting inventoried user artifacts and never reuses offsets;
 system logs are not user-retained.
 
+Snapshots are bound to their log by a projection-prefix digest. The reserved
+system logs keep that digest as a running hash (`prefixDigestState` in
+`storage/snapshot.go`) that each durable append extends, so publication never
+re-reads the log; a non-contiguous extension drops the cache and the next
+request rebuilds it from the segments. The cache is safe only because every
+system-log append and every snapshot build runs under the store mutex — keep
+new metadata write paths under that mutex. `SaveSnapshots` holds the store
+mutex just long enough to build the bytes and publishes outside it under
+`snapshotMu`, because consumer lease renewal also needs the store mutex; do
+not widen that critical section back over the file write and sync.
+
+A partition keeps a live descriptor only for its active segment; every sealed
+segment's handle is closed (at roll time and after recovery) and reopened on
+demand through the store's bounded `segmentFileCache`
+(`storage/segment_files.go`, `Store.segmentFiles`,
+`StoreOptions.MaxOpenSegmentFiles`). Any new code that reads segment bytes
+must go through `Partition.acquireSegmentFile`/`readSegmentFile` rather than
+assuming `segment.file` is non-nil — it is nil for every segment except the
+last one. Before this cache existed, recovery reopened every historical
+segment and never released the sealed ones, so a long-lived log's descriptor
+count matched its total segment count and only grew across reopens; that
+growth is what the cap eliminates. `installSegmentIndexes` (index/timeindex
+sidecars) is expensive for a large log, so a sealed segment's `indexDirty`
+flag lets `Partition.Close` skip republishing sidecars that were already
+checkpointed when their segment rolled — only the still-open active segment
+and any index that failed to read back at recovery stay dirty.
+
 Storage tests should use `t.TempDir()` and never write to a real user data
 directory. `Store.Open` owns the data directory through its stable `LOCK`
 file; do not remove, replace, or truncate that file. Treat complete corrupt

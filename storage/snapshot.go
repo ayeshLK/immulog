@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -94,18 +95,77 @@ func decodeSnapshotHeader(data []byte) (snapshotHeader, error) {
 	return header, nil
 }
 
+// prefixDigestState caches the running projection-prefix hash of one reserved
+// system log. The hash covers the digest prelude followed by every batch byte
+// below covered, so a durable append extends it in place instead of forcing
+// the next snapshot to re-read the whole log. Every writer and reader of this
+// cache runs under the store mutex: system-log appends are only issued while
+// it is held, and so are snapshot builds.
+type prefixDigestState struct {
+	hash    hash.Cloner
+	storeID StoreID
+	covered uint64
+}
+
+// newPrefixDigest starts a projection-prefix hash over the log identity. The
+// prelude binds the digest to one store, topic, and partition so a snapshot
+// cannot be replayed against a different log.
+func newPrefixDigest(storeID StoreID, topic api.TopicID, partition uint32) hash.Cloner {
+	running := sha256.New().(hash.Cloner)
+	running.Write([]byte("IEL-PROJECTION-PREFIX-V1\x00"))
+	running.Write(storeID[:])
+	running.Write(topic[:])
+	var scalar [4]byte
+	binary.LittleEndian.PutUint32(scalar[:], partition)
+	running.Write(scalar[:])
+	return running
+}
+
+// finishPrefixDigest seals a copy of the running hash at nextOffset. The
+// running state is left untouched so later appends can keep extending it.
+func finishPrefixDigest(running hash.Cloner, nextOffset uint64) ([32]byte, error) {
+	var result [32]byte
+	sealed, err := running.Clone()
+	if err != nil {
+		return result, err
+	}
+	var scalar [8]byte
+	binary.LittleEndian.PutUint64(scalar[:], nextOffset)
+	sealed.Write(scalar[:])
+	copy(result[:], sealed.Sum(nil))
+	return result, nil
+}
+
+// extendPrefixDigestLocked advances the cached prefix hash over one durable
+// batch. The caller owns p.mu and has already advanced p.logEnd. A batch that
+// does not continue the cached prefix drops the cache; the next digest request
+// rebuilds it from the authoritative segments.
+func (p *Partition) extendPrefixDigestLocked(base uint64, encoded []byte) {
+	cached := p.prefixDigest
+	if cached == nil {
+		return
+	}
+	if cached.covered != base {
+		p.prefixDigest = nil
+		return
+	}
+	cached.hash.Write(encoded)
+	cached.covered = p.logEnd
+}
+
+// projectionPrefixDigest returns the digest of the durable log prefix that
+// ends at nextOffset. Reserved system logs keep the running hash for their
+// current durable end, so the common snapshot path costs one hash copy rather
+// than a re-read of every batch; any other request reads the prefix.
 func projectionPrefixDigest(partition *Partition, storeID StoreID, nextOffset uint64) ([32]byte, error) {
 	var result [32]byte
 	if nextOffset > partition.logEnd {
 		return result, errors.New("snapshot offset is beyond log end")
 	}
-	hash := sha256.New()
-	hash.Write([]byte("IEL-PROJECTION-PREFIX-V1\x00"))
-	hash.Write(storeID[:])
-	hash.Write(partition.topic[:])
-	var scalar [8]byte
-	binary.LittleEndian.PutUint32(scalar[:4], partition.partition)
-	hash.Write(scalar[:4])
+	if cached := partition.prefixDigest; cached != nil && cached.storeID == storeID && cached.covered == nextOffset {
+		return finishPrefixDigest(cached.hash, nextOffset)
+	}
+	running := newPrefixDigest(storeID, partition.topic, partition.partition)
 	buffer := make([]byte, snapshotValidationBufferBytes)
 	var covered uint64
 	for _, segment := range partition.segments {
@@ -123,8 +183,13 @@ func projectionPrefixDigest(partition *Partition, storeID StoreID, nextOffset ui
 			if batch.base != covered {
 				return result, errors.New("snapshot prefix has a gap")
 			}
-			reader := io.NewSectionReader(segment.file, batch.position, int64(batch.bytes))
-			count, err := io.CopyBuffer(hash, reader, buffer)
+			file, release, err := partition.acquireSegmentFile(segment)
+			if err != nil {
+				return result, err
+			}
+			reader := io.NewSectionReader(file, batch.position, int64(batch.bytes))
+			count, err := io.CopyBuffer(running, reader, buffer)
+			release()
 			if err != nil {
 				return result, err
 			}
@@ -137,10 +202,10 @@ func projectionPrefixDigest(partition *Partition, storeID StoreID, nextOffset ui
 	if covered != nextOffset {
 		return result, errors.New("snapshot prefix is incomplete")
 	}
-	binary.LittleEndian.PutUint64(scalar[:], nextOffset)
-	hash.Write(scalar[:])
-	copy(result[:], hash.Sum(nil))
-	return result, nil
+	if partition.isSystemPartition() && covered == partition.logEnd {
+		partition.prefixDigest = &prefixDigestState{hash: running, storeID: storeID, covered: covered}
+	}
+	return finishPrefixDigest(running, nextOffset)
 }
 
 func encodeCatalogSnapshotPayload(projection *catalogProjection) ([]byte, uint64, error) {
@@ -305,47 +370,84 @@ func validateSnapshotFile(path string, partition *Partition, kind uint16, storeI
 	return nil
 }
 
+// pendingSnapshot is one built, not yet published, projection cache.
+type pendingSnapshot struct {
+	dir  string
+	kind uint16
+	data []byte
+}
+
 // SaveSnapshots publishes replaceable projection caches for both reserved logs.
 // The authoritative logs remain the only recovery source of truth.
+//
+// The store mutex is held only while the snapshot bytes are built. Writing and
+// syncing them runs outside it, so a snapshot never delays a consumer poll,
+// commit, or lease renewal. snapshotMu keeps concurrent callers from
+// publishing an older snapshot over a newer one.
 func (store *Store) SaveSnapshots() error {
+	store.snapshotMu.Lock()
+	defer store.snapshotMu.Unlock()
+	pending, err := store.buildSnapshots()
+	if err != nil {
+		return err
+	}
+	for _, snapshot := range pending {
+		publishErr := publishSnapshot(filepath.Join(snapshot.dir, snapshotPathName), snapshot.data)
+		store.recordSnapshotDiagnostic(snapshot.kind, publishErr)
+		if publishErr != nil {
+			return publishErr
+		}
+	}
+	return nil
+}
+
+// buildSnapshots encodes both projection caches under the store mutex. The
+// returned bytes describe the durable prefix observed at this instant; a later
+// append simply leaves the published snapshot behind its log, which reopen
+// treats as a miss and answers by replaying the authoritative records.
+func (store *Store) buildSnapshots() ([]pendingSnapshot, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.closed {
-		return api.ErrClosed
+		return nil, api.ErrClosed
 	}
 	if store.closing.Load() {
-		return api.ErrClosing
+		return nil, api.ErrClosing
 	}
 	if store.metadataUnavailable {
-		return api.ErrMetadataUnavailable
+		return nil, api.ErrMetadataUnavailable
 	}
 	catalogPayload, catalogEntries, err := encodeCatalogSnapshotPayload(store.catalogState)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	catalogData, err := buildSnapshot(store.catalog, snapshotKindCatalog, store.storeID, catalogPayload, catalogEntries)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	offsetsPayload, offsetEntries, err := encodeOffsetsSnapshotPayload(store.offsetsState)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	offsetsData, err := buildSnapshot(store.offsets, snapshotKindOffsets, store.storeID, offsetsPayload, offsetEntries)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := publishSnapshot(filepath.Join(store.catalog.dir, snapshotPathName), catalogData); err != nil {
-		store.snapshotDiagnostics.Catalog = err
-		return err
+	return []pendingSnapshot{
+		{dir: store.catalog.dir, kind: snapshotKindCatalog, data: catalogData},
+		{dir: store.offsets.dir, kind: snapshotKindOffsets, data: offsetsData},
+	}, nil
+}
+
+// recordSnapshotDiagnostic publishes the latest outcome for one reserved log.
+func (store *Store) recordSnapshotDiagnostic(kind uint16, cause error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if kind == snapshotKindCatalog {
+		store.snapshotDiagnostics.Catalog = cause
+		return
 	}
-	store.snapshotDiagnostics.Catalog = nil
-	if err := publishSnapshot(filepath.Join(store.offsets.dir, snapshotPathName), offsetsData); err != nil {
-		store.snapshotDiagnostics.Offsets = err
-		return err
-	}
-	store.snapshotDiagnostics.Offsets = nil
-	return nil
+	store.snapshotDiagnostics.Offsets = cause
 }
 
 func validateOptionalSnapshots(storeID StoreID, catalog, offsets *Partition, projection *catalogProjection, offsetsState *offsetsProjection) SnapshotDiagnostics {

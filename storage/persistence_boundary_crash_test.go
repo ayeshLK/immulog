@@ -227,6 +227,12 @@ func runRetentionCrashHelper(dir, scenario string) {
 		if err != nil || len(partition) != 1 {
 			crashHelperFailure(fmt.Sprintf("open retention crash partition: %v", err))
 		}
+		// Recovery released the sealed segment's descriptor to the store's
+		// bounded cache immediately, so read it back once to give retention's
+		// cleanup close a real, cached handle to close.
+		if _, err := partition[0].Fetch(context.Background(), 0, api.FetchOptions{MaxRecords: 1}); err != nil {
+			crashHelperFailure(fmt.Sprintf("prime retention crash segment cache: %v", err))
+		}
 		installCrashAfterFilesystem(filesystemClose, partition[0].segments[0].path, true, 0)
 	}
 	if err := store.RunRetention(context.Background()); err != nil {

@@ -36,7 +36,10 @@ type SnapshotDiagnostics struct {
 // Store owns one immulog data directory. Ownership lasts until Close has
 // stopped every partition and released the operating-system lock.
 type Store struct {
-	closeMu          sync.Mutex
+	closeMu sync.Mutex
+	// snapshotMu serializes snapshot publication and keeps it from racing a
+	// close that is about to release directory ownership.
+	snapshotMu       sync.Mutex
 	retentionMu      sync.Mutex
 	retentionStop    chan struct{}
 	retentionWake    chan struct{}
@@ -54,6 +57,7 @@ type Store struct {
 	catalog          *Partition
 	offsets          *Partition
 	tailBudget       *tailBudget
+	segmentFiles     *segmentFileCache
 	disk             *diskPressureLedger
 	options          StoreOptions
 	catalogState     *catalogProjection
@@ -97,6 +101,12 @@ type StoreOptions struct {
 	// MaxOpenPartitions caps active user-partition writers/rings. Zero selects
 	// the finite default and does not limit durable catalog history.
 	MaxOpenPartitions uint32
+	// MaxOpenSegmentFiles caps descriptors held for sealed segments across this
+	// store. Each open partition also keeps one writer handle for its active
+	// segment, so the process holds at most this many plus one per open
+	// partition. Zero selects the finite default; readers briefly exceed the
+	// cap rather than close a descriptor that a fetch is still using.
+	MaxOpenSegmentFiles uint32
 	// MaxCatalogHistoryBytes caps new logical growth of __cluster_metadata.
 	// Zero selects the finite default; an existing larger history remains
 	// readable, but cannot grow until the Store is reopened with a larger limit.
@@ -134,6 +144,9 @@ func (options *StoreOptions) normalize() {
 	}
 	if options.MaxOpenPartitions == 0 {
 		options.MaxOpenPartitions = 1024
+	}
+	if options.MaxOpenSegmentFiles == 0 {
+		options.MaxOpenSegmentFiles = 512
 	}
 	if options.MaxCatalogHistoryBytes == 0 {
 		options.MaxCatalogHistoryBytes = defaultSystemLogCapacityBytes
@@ -364,8 +377,9 @@ func OpenWithOptions(dir string, options StoreOptions) (*Store, error) {
 	store := &Store{
 		rootPath: rootPath, root: root, lock: lock, identity: identity,
 		storeID: metadata.projection.storeID, partitions: make(map[partitionKey]*Partition), tailBudget: newTailBudget(options.TailBytes), disk: disk,
-		options: options,
-		catalog: metadata.catalog, offsets: metadata.offsets, catalogState: metadata.projection, catalogAdmission: make(chan struct{}, 1), offsetsState: metadata.offsetsState, consumers: make(map[string]*Consumer), groupConsumers: make(map[string]*GroupConsumer), expiredGroups: make(map[string]bool), offsetsAdmission: make(chan struct{}, 1), snapshotDiagnostics: metadata.snapshotDiagnostics,
+		segmentFiles: newSegmentFileCache(options.MaxOpenSegmentFiles),
+		options:      options,
+		catalog:      metadata.catalog, offsets: metadata.offsets, catalogState: metadata.projection, catalogAdmission: make(chan struct{}, 1), offsetsState: metadata.offsetsState, consumers: make(map[string]*Consumer), groupConsumers: make(map[string]*GroupConsumer), expiredGroups: make(map[string]bool), offsetsAdmission: make(chan struct{}, 1), snapshotDiagnostics: metadata.snapshotDiagnostics,
 		openedAt: time.Now(), retentionStop: make(chan struct{}), retentionWake: make(chan struct{}, 1), retentionDone: make(chan struct{}),
 	}
 	// System partitions need the store back-reference so their appends route
@@ -480,6 +494,11 @@ func (s *Store) Close() error {
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
 	s.closing.Store(true)
+	// Snapshot publication runs outside the store mutex, so wait for an
+	// in-flight publication before ownership of the directory is released.
+	// Builds that start later observe the closing flag and never publish.
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
 	s.mu.Lock()
 	if s.closeStartedAt.IsZero() {
 		s.closeStartedAt = time.Now()
@@ -506,6 +525,9 @@ func (s *Store) Close() error {
 		closeErr = errors.Join(closeErr, partition.Close())
 	}
 	closeErr = errors.Join(closeErr, s.catalog.Close(), s.offsets.Close())
+	if s.segmentFiles != nil {
+		closeErr = errors.Join(closeErr, s.segmentFiles.closeAll())
+	}
 	s.mu.Lock()
 	closeErr = errors.Join(closeErr, releaseLock(s.lock))
 	closeErr = errors.Join(closeErr, fileClose(s.root))
