@@ -181,6 +181,24 @@ or qualification runs should start from a clean, recorded commit. Long runs
 can consume multiple GiB and thousands of open files; keep automatic resource
 preflights enabled unless deliberately testing a lower limit.
 
+Keep `BENCHMARKS.md` reader-oriented: include a table of contents, purpose and
+measurement guidance, runnable commands for each benchmark family, and results
+grouped by test type with newest results first. Use concise environment/result
+tables; include processor, CPU count, OS/kernel, architecture, memory, Go
+version, date, and commit when available. Mark missing values as “not captured”
+rather than inferring them. Do not include local evidence-directory
+paths or filesystem/device details in checked-in result entries; preserve
+those in the run artifacts when useful. Retain only results comparable to the
+current benchmark framework. At this checkpoint, keep the 2026-09-20
+microbenchmark and 2026-09-25 sustained-soak results; remove obsolete results
+when the framework has materially evolved. Do not commit raw run artifacts.
+
+The current soak warmup path invokes one `runSoakCycle`, which can return at
+the reopen interval before a longer configured warmup elapses. Do not treat
+`warmup_nanos` alone as proof of elapsed warmup; confirm timestamps or use a
+configuration/code path that completes the intended warmup before recording
+qualification evidence.
+
 A sustained no-churn run that reports consumer assignment loss without a
 replacement is a failed liveness run, not throughput evidence. The soak's
 consumer progress timeout is currently five seconds; diagnose the reported
