@@ -21,6 +21,71 @@ are authoritative, while indexes, snapshots, and live-tail caches are
 rebuildable. Managed consumers are same-process, at-least-once assignments
 with durable commits and fencing.
 
+## Architecture Map
+
+The exported surface is small (`Store`, `Partition`, `Reader`, `Consumer`,
+`GroupConsumer`); nearly all behavior lives in unexported collaborators inside
+`storage/`. The following traces are the fastest way to orient before editing.
+
+**On-disk layout** (rooted at the store directory):
+
+```
+LOCK                                  stable ownership lock (lock_linux.go)
+system/cluster-metadata/0/            catalog system log (__cluster_metadata)
+system/consumer-offsets/0/            offsets system log (__consumer_offsets)
+topics/<topic-uuid>/<partition>/      user partitions
+  00000000000000000000.log            segment, base offset zero-padded to 20
+  00000000000000000000.index          sampled offset index (rebuildable)
+  00000000000000000000.timeindex      sampled time index (rebuildable)
+  projection.snapshot                 system logs only, optional accelerator
+  .topic-preparation-v1               crash-safe topic creation marker
+```
+
+`format.go` holds the wire constants (`SegmentMagic`, `BatchMagic`, header
+sizes, CRC32C) and the `EventType` enum; `codec.go` encodes/decodes batches.
+All integers are little-endian. Only `filesystem.go`'s `fileSystemOps` seam
+touches the OS, which is how fault-injection tests simulate write/sync
+failures.
+
+**Append path** (`Partition.Append`, `writer.go:386`): validate and charge the
+request → reserve disk through `Partition.reserveDisk` → `admit` against the
+in-flight bound → copy caller bytes (`copyRequest`) → `enqueue` publishes into
+the per-partition disruptor ring (`ingress.go`). A single `BatchProcessor`
+goroutine is the only writer: `ingressHandler.Handle` accumulates an
+end-of-batch group, `writeIngressBatches` splits it by `BatchRecords`/
+`BatchBytes`, and `writeRequests` assigns offsets from `p.logEnd` and calls
+`appendEncodedLocked` (`append_encoded.go`), which rolls segments, writes,
+syncs, and only then completes the waiting callers. A sync failure marks the
+partition unavailable and returns `ErrAppendOutcomeUnknown` — nothing is rolled
+back. `ingress.go` is the *only* adapter over `lib-disruptor`; keep it that way.
+
+**Read path** (`fetch.go`): bounds-check against segment zero's base offset and
+`logEnd`, try the optional in-memory live tail (`tail.go`, byte-bounded per
+store via `tailBudget`), else scan segments from the nearest sampled
+`offsetIndex` hint. `Reader` is a thin cursor over `Fetch`.
+
+**Metadata as logs**: the catalog and consumer offsets are themselves
+append-only partitions of records carrying `EventTopicCreated`,
+`EventPartitionLogStartAdvanced`, `EventGroupCreated`,
+`EventLocalAssignmentChanged`, `EventOffsetCommitted`, and
+`EventStoreInitialized` (`events.go`, `events_validation.go`). `Open` runs
+`bootstrapMetadata` (`bootstrap.go`), replays both logs into
+`catalogProjection` (`catalog.go`) and `offsetsProjection`
+(`offsets_projection.go`), preflights user storage against the projection
+(`preflight.go`), then reconciles retired artifacts. `snapshot.go` snapshots
+are validated accelerators, never authority — a mismatch degrades to replay and
+is reported through `Store.SnapshotDiagnostics`.
+
+**Consumers**: `consumer.go` is one assignment (group, topic, partition);
+`group_consumer.go` is a same-process multi-partition group with canonical
+membership, generations, and fencing. Both serialize durable commits through
+`Store.appendOffsetsEventLocked` on the offsets log.
+
+**Cross-cutting**: `retention.go` (background loop, advances log start before
+deleting), `disk_pressure.go` (class-aware byte/inode ledger, see the Safety
+section), `stats.go`/`consumer_stats.go` (bounded diagnostics and latency
+buckets), `config.go` and `capacity.go` (limit defaults and planning).
+
 ## Build, Test, and Development Commands
 
 This is a single Go 1.26 module using the standard Go toolchain; there is no
@@ -163,6 +228,33 @@ Startup preflights authoritative storage before mutation; only a verified
 incomplete final tail may be truncated. Retention advances the durable log-start
 boundary before deleting inventoried user artifacts and never reuses offsets;
 system logs are not user-retained.
+
+Snapshots are bound to their log by a projection-prefix digest. The reserved
+system logs keep that digest as a running hash (`prefixDigestState` in
+`storage/snapshot.go`) that each durable append extends, so publication never
+re-reads the log; a non-contiguous extension drops the cache and the next
+request rebuilds it from the segments. The cache is safe only because every
+system-log append and every snapshot build runs under the store mutex — keep
+new metadata write paths under that mutex. `SaveSnapshots` holds the store
+mutex just long enough to build the bytes and publishes outside it under
+`snapshotMu`, because consumer lease renewal also needs the store mutex; do
+not widen that critical section back over the file write and sync.
+
+A partition keeps a live descriptor only for its active segment; every sealed
+segment's handle is closed (at roll time and after recovery) and reopened on
+demand through the store's bounded `segmentFileCache`
+(`storage/segment_files.go`, `Store.segmentFiles`,
+`StoreOptions.MaxOpenSegmentFiles`). Any new code that reads segment bytes
+must go through `Partition.acquireSegmentFile`/`readSegmentFile` rather than
+assuming `segment.file` is non-nil — it is nil for every segment except the
+last one. Before this cache existed, recovery reopened every historical
+segment and never released the sealed ones, so a long-lived log's descriptor
+count matched its total segment count and only grew across reopens; that
+growth is what the cap eliminates. `installSegmentIndexes` (index/timeindex
+sidecars) is expensive for a large log, so a sealed segment's `indexDirty`
+flag lets `Partition.Close` skip republishing sidecars that were already
+checkpointed when their segment rolled — only the still-open active segment
+and any index that failed to read back at recovery stay dirty.
 
 Storage tests should use `t.TempDir()` and never write to a real user data
 directory. `Store.Open` owns the data directory through its stable `LOCK`

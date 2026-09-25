@@ -96,65 +96,88 @@ func (p *Partition) Fetch(ctx context.Context, offset uint64, options api.FetchO
 		if offset >= segment.end {
 			continue
 		}
-		position := int64(SegmentHeaderBytes)
-		for _, hint := range segment.offsetIndex {
-			if hint.base > offset {
-				break
-			}
-			if hint.position > uint64(segment.size) {
-				return api.FetchResult{NextOffset: offset}, corrupt(errInvalidBatch, "offset index position exceeds segment size")
-			}
-			position = int64(hint.position)
+		done, err := p.scanSegmentForFetch(ctx, segment, offset, options, &result, &resultBytes)
+		if err != nil {
+			return api.FetchResult{NextOffset: offset}, err
 		}
-		for position < segment.size {
-			if err := ctx.Err(); err != nil {
-				return api.FetchResult{NextOffset: offset}, err
-			}
-			var header [BatchHeaderBytes]byte
-			if err := readAtFull(segment.file, header[:], position); err != nil {
-				return api.FetchResult{NextOffset: offset}, fmt.Errorf("read batch header from %q: %w", segment.path, err)
-			}
-			length := binary.LittleEndian.Uint32(header[8:12])
-			if length < uint32(BatchHeaderBytes)+BatchTrailerBytes || length > MaxBatchBytes || int64(length) > segment.size-position {
-				return api.FetchResult{NextOffset: offset}, corrupt(errInvalidBatch, "batch length exceeds segment during fetch")
-			}
-			data := make([]byte, int(length))
-			copy(data, header[:])
-			if err := readAtFull(segment.file, data[BatchHeaderBytes:], position+int64(BatchHeaderBytes)); err != nil {
-				return api.FetchResult{NextOffset: offset}, fmt.Errorf("read batch body from %q: %w", segment.path, err)
-			}
-			batch, err := DecodeBatch(data, p.topic, p.partition)
-			if err != nil {
-				return api.FetchResult{NextOffset: offset}, err
-			}
-			position += int64(length)
-			for _, record := range batch.Records {
-				if record.Offset < offset {
-					continue
-				}
-				if uint32(len(result.Records)) >= options.MaxRecords {
-					return result, nil
-				}
-				recordBytes, err := recordEncodedBytes(record)
-				if err != nil {
-					return api.FetchResult{NextOffset: offset}, err
-				}
-				if recordBytes > options.MaxBytes-resultBytes {
-					if len(result.Records) == 0 {
-						return api.FetchResult{NextOffset: offset}, errors.Join(api.ErrFetchLimitTooSmall, fmt.Errorf("record at offset %d needs %d bytes, limit is %d", record.Offset, recordBytes, options.MaxBytes))
-					}
-					return result, nil
-				}
-				result.Records = append(result.Records, record)
-				resultBytes += recordBytes
-				result.NextOffset = record.Offset + 1
-			}
+		if done {
+			return result, nil
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return api.FetchResult{NextOffset: offset}, err
 	}
 	return result, nil
+}
+
+// scanSegmentForFetch scans one segment's batches from the sampled offset
+// index hint through options.MaxRecords/MaxBytes, appending matches to result.
+// done reports whether the caller's limits were reached and Fetch should
+// return immediately with the accumulated result; a non-nil err means Fetch
+// should return an empty result carrying only the next offset, matching the
+// error-path shape the inline scan used before it was split out to bound its
+// segment file descriptor to one acquire/release pair.
+func (p *Partition) scanSegmentForFetch(ctx context.Context, segment *segment, offset uint64, options api.FetchOptions, result *api.FetchResult, resultBytes *uint64) (done bool, err error) {
+	file, release, err := p.acquireSegmentFile(segment)
+	if err != nil {
+		return false, fmt.Errorf("open segment %q: %w", segment.path, err)
+	}
+	defer release()
+	position := int64(SegmentHeaderBytes)
+	for _, hint := range segment.offsetIndex {
+		if hint.base > offset {
+			break
+		}
+		if hint.position > uint64(segment.size) {
+			return false, corrupt(errInvalidBatch, "offset index position exceeds segment size")
+		}
+		position = int64(hint.position)
+	}
+	for position < segment.size {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		var header [BatchHeaderBytes]byte
+		if err := readAtFull(file, header[:], position); err != nil {
+			return false, fmt.Errorf("read batch header from %q: %w", segment.path, err)
+		}
+		length := binary.LittleEndian.Uint32(header[8:12])
+		if length < uint32(BatchHeaderBytes)+BatchTrailerBytes || length > MaxBatchBytes || int64(length) > segment.size-position {
+			return false, corrupt(errInvalidBatch, "batch length exceeds segment during fetch")
+		}
+		data := make([]byte, int(length))
+		copy(data, header[:])
+		if err := readAtFull(file, data[BatchHeaderBytes:], position+int64(BatchHeaderBytes)); err != nil {
+			return false, fmt.Errorf("read batch body from %q: %w", segment.path, err)
+		}
+		batch, err := DecodeBatch(data, p.topic, p.partition)
+		if err != nil {
+			return false, err
+		}
+		position += int64(length)
+		for _, record := range batch.Records {
+			if record.Offset < offset {
+				continue
+			}
+			if uint32(len(result.Records)) >= options.MaxRecords {
+				return true, nil
+			}
+			recordBytes, err := recordEncodedBytes(record)
+			if err != nil {
+				return false, err
+			}
+			if recordBytes > options.MaxBytes-*resultBytes {
+				if len(result.Records) == 0 {
+					return false, errors.Join(api.ErrFetchLimitTooSmall, fmt.Errorf("record at offset %d needs %d bytes, limit is %d", record.Offset, recordBytes, options.MaxBytes))
+				}
+				return true, nil
+			}
+			result.Records = append(result.Records, record)
+			*resultBytes += recordBytes
+			result.NextOffset = record.Offset + 1
+		}
+	}
+	return false, nil
 }
 
 func minFetchCapacity(limit uint32) int {

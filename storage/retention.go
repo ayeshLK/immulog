@@ -234,6 +234,7 @@ func (store *Store) retainPartitionAt(partition *Partition, now time.Time) error
 			return nil, errors.Join(api.ErrMetadataUnavailable, err)
 		}
 		partition.segments = proposal.retained
+		partition.prefixDigest = nil
 		partition.tail.clear()
 		partition.signalFetchWaitersLocked()
 		return proposal.retired, nil
@@ -241,7 +242,7 @@ func (store *Store) retainPartitionAt(partition *Partition, now time.Time) error
 	if err != nil || len(retired) == 0 {
 		return err
 	}
-	return cleanupRetiredSegments(partition.dir, retired)
+	return cleanupRetiredSegments(partition, retired)
 }
 
 func retiredEvents(segments []*segment) []retiredSegmentEvent {
@@ -275,6 +276,12 @@ func planRetentionLocked(partition *Partition, config PartitionConfigV1, nowMill
 		// can be checkpointed without affecting the retention boundary.
 		_ = installSegmentIndexes(active, partition.storeID, partition.options.IndexStride)
 		partition.segments = append(partition.segments, rolled)
+		// An age- or size-driven roll can leave the former active segment
+		// retained (not yet eligible for retirement below); without this it
+		// would keep a live writer handle outside the bounded descriptor
+		// cache for as long as it stays retained, same as an ingress roll.
+		_ = fileClose(active.file)
+		active.file = nil
 		if total > math.MaxUint64-uint64(rolled.size) {
 			return nil, errors.Join(api.ErrResourceLimit, errors.New("retained segment bytes overflow"))
 		}
@@ -351,22 +358,26 @@ func elapsedAtLeast(nowMillis, timestampMillis int64, durationMillis uint64) boo
 	return uint64(nowMillis)-uint64(timestampMillis) >= durationMillis
 }
 
-func cleanupRetiredSegments(dir string, segments []*segment) error {
+func cleanupRetiredSegments(partition *Partition, segments []*segment) error {
 	var result error
 	for _, segment := range segments {
 		if segment == nil {
 			continue
 		}
-		if err := fileClose(segment.file); err != nil {
-			result = errors.Join(result, err)
-			continue
+		// A retired segment is never the active one, so its writer handle was
+		// already released to the store's bounded descriptor cache; forget the
+		// cached handle (closing it) rather than closing a nil writer handle.
+		if segment.file != nil {
+			result = errors.Join(result, fileClose(segment.file))
+		} else {
+			partition.forgetSegmentFile(segment.path)
 		}
 		result = errors.Join(result, removeRetiredArtifact(segment.path))
 		result = errors.Join(result, removeRetiredArtifact(indexPath(segment.path, false)))
 		result = errors.Join(result, removeRetiredArtifact(indexPath(segment.path, true)))
 	}
 	if len(segments) != 0 {
-		result = errors.Join(result, syncDir(dir))
+		result = errors.Join(result, syncDir(partition.dir))
 	}
 	return result
 }

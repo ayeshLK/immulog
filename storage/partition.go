@@ -79,16 +79,19 @@ func (options *PartitionOptions) normalize() {
 // Partition is a local append-only partition engine. Concurrent producers enter
 // its bounded ingress ring; exactly one terminal handler performs durable writes.
 type Partition struct {
-	mu           sync.RWMutex
-	store        *Store
-	dir          string
-	topic        api.TopicID
-	partition    uint32
-	options      PartitionOptions
-	storeID      StoreID
-	tail         *partitionTail
-	segments     []*segment
-	logEnd       uint64
+	mu        sync.RWMutex
+	store     *Store
+	dir       string
+	topic     api.TopicID
+	partition uint32
+	options   PartitionOptions
+	storeID   StoreID
+	tail      *partitionTail
+	segments  []*segment
+	logEnd    uint64
+	// prefixDigest caches the running projection-prefix hash of a reserved
+	// system log. It stays nil for user partitions, which are never snapshotted.
+	prefixDigest *prefixDigestState
 	closed       bool
 	closing      bool
 	fetchWake    chan struct{}
@@ -149,6 +152,10 @@ type segment struct {
 	batches     []batchInfo
 	offsetIndex []offsetIndexEntry
 	timeIndex   []timeIndexEntry
+	// indexDirty marks an in-memory index that the persisted sidecars do not
+	// reflect yet. A sealed segment is checkpointed once when it rolls, so only
+	// the active segment and unreadable sidecars need work at close.
+	indexDirty bool
 }
 
 func openPartition(dir string, topic api.TopicID, partition uint32, options PartitionOptions, storeID StoreID) (*Partition, error) {
@@ -189,7 +196,9 @@ func openPartition(dir string, topic api.TopicID, partition uint32, options Part
 		opened, next, err := recoverSegment(file.path, topic, partition, index == len(files)-1, expected)
 		if err != nil {
 			for _, prior := range p.segments {
-				_ = fileClose(prior.file)
+				if prior.file != nil {
+					_ = fileClose(prior.file)
+				}
 			}
 			return nil, err
 		}
@@ -198,9 +207,22 @@ func openPartition(dir string, topic api.TopicID, partition uint32, options Part
 		expected = next
 	}
 	p.logEnd = expected
+	// Recovery opens every segment to rebuild its batch map. Only the active
+	// segment needs a lasting handle; sealed segments are reopened on demand
+	// through the store's bounded descriptor cache.
+	if err := p.releaseSealedHandles(); err != nil {
+		for _, segment := range p.segments {
+			if segment.file != nil {
+				_ = fileClose(segment.file)
+			}
+		}
+		return nil, err
+	}
 	if err := p.startWriter(); err != nil {
 		for _, segment := range p.segments {
-			_ = fileClose(segment.file)
+			if segment.file != nil {
+				_ = fileClose(segment.file)
+			}
 		}
 		return nil, err
 	}
@@ -290,7 +312,8 @@ func createSegment(dir string, topic api.TopicID, partition uint32, base uint64)
 	if err != nil {
 		return nil, fmt.Errorf("open published segment: %w", err)
 	}
-	return &segment{path: finalPath, file: file, header: header, end: base, size: int64(SegmentHeaderBytes), maxTime: math.MinInt64, headerHash: segmentHeaderHash(encoded)}, nil
+	// A fresh segment has no sidecars on disk yet.
+	return &segment{path: finalPath, file: file, header: header, end: base, size: int64(SegmentHeaderBytes), maxTime: math.MinInt64, headerHash: segmentHeaderHash(encoded), indexDirty: true}, nil
 }
 
 func recoverSegment(path string, topic api.TopicID, partition uint32, final bool, expected uint64) (*segment, uint64, error) {
@@ -411,6 +434,18 @@ func readFile(file *os.File, size int64) ([]byte, error) {
 	return data, nil
 }
 
+// readSegmentFile reads a whole segment through the bounded descriptor cache
+// rather than assuming segment.file is a live handle, which only the active
+// segment keeps.
+func readSegmentFile(p *Partition, target *segment) ([]byte, error) {
+	file, release, err := p.acquireSegmentFile(target)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return readFile(file, target.size)
+}
+
 // AppendBatch durably appends a complete, contiguous batch and returns its
 // first offset. It is the direct reference writer used before ingress rings.
 //
@@ -525,7 +560,7 @@ func (p *Partition) Read(offset uint64, maxRecords uint32) ([]api.Record, error)
 		if offset >= segment.end {
 			continue
 		}
-		data, err := readFile(segment.file, segment.size)
+		data, err := readSegmentFile(p, segment)
 		if err != nil {
 			return nil, fmt.Errorf("read segment %q: %w", segment.path, err)
 		}

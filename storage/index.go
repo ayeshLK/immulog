@@ -443,6 +443,7 @@ func installSegmentIndexes(segment *segment, storeID StoreID, stride uint64) err
 	}
 	segment.offsetIndex = offsetEntries
 	segment.timeIndex = timeEntries
+	segment.indexDirty = false
 	return nil
 }
 
@@ -465,6 +466,8 @@ func loadOrBuildIndexes(segment *segment, storeID StoreID, stride uint64) {
 		if segment.timeIndex == nil {
 			segment.timeIndex = timeEntries
 		}
+		// A sidecar that could not be read back has to be republished.
+		segment.indexDirty = true
 	}
 }
 
@@ -474,4 +477,5 @@ func refreshSegmentIndexes(segment *segment, _ StoreID, stride uint64) {
 	offsetEntries, timeEntries := sampleBatchIndexes(segment.batches, stride)
 	segment.offsetIndex = offsetEntries
 	segment.timeIndex = timeEntries
+	segment.indexDirty = true
 }

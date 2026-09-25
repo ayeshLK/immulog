@@ -108,6 +108,62 @@ func TestRetentionRollPublishesOnlyTheFormerActiveSegment(t *testing.T) {
 	}
 }
 
+func TestRetentionRollReleasesFormerActiveSegmentHandleWhenNotYetRetired(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenWithOptions(dir, StoreOptions{MaxOpenSegmentFiles: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := PartitionOptions{
+		RetentionTimeEnabled: true,
+		RetentionDuration:    time.Hour,
+		MaxSegmentAge:        time.Millisecond,
+		RetentionCheck:       time.Hour,
+	}
+	descriptor, err := store.CreateTopic("retention-roll-handle", 1, options)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	partitions, err := store.OpenTopic(descriptor.Name)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	partition := partitions[0]
+	if _, err := partition.Append(context.Background(), api.AppendRequest{Topic: descriptor.ID, Partition: 0, Value: []byte("value")}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	// MaxSegmentAge rolls the segment, but RetentionDuration keeps the former
+	// active segment retained rather than retired, so cleanupRetiredSegments
+	// never runs on it; the roll itself must release the handle.
+	if err := store.runRetentionAt(context.Background(), time.Now().Add(2*time.Millisecond)); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if len(partition.segments) != 2 {
+		_ = store.Close()
+		t.Fatalf("segment count after retention roll = %d, want 2", len(partition.segments))
+	}
+	if partition.segments[0].file != nil {
+		_ = store.Close()
+		t.Fatal("retention roll left a live handle on the former active, now-retained segment")
+	}
+	if partition.segments[1].file == nil {
+		_ = store.Close()
+		t.Fatal("retention roll did not keep a live handle on the new active segment")
+	}
+	// The released segment must still be readable through the bounded cache.
+	if _, err := partition.Fetch(context.Background(), 0, api.FetchOptions{MaxRecords: 1, MaxBytes: 1 << 16}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSizeRetentionPublishesBoundaryCleansArtifactsAndReopens(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir)

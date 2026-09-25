@@ -287,6 +287,11 @@ consumer offsets. Snapshots can speed startup but are not authoritative and
 are not a backup format; the durable system logs remain the recovery source of
 truth.
 
+Publication cost does not grow with the length of a system log, and the
+snapshot file write and sync run outside the store lock, so calling it
+periodically does not stall appends, polls, or commits. A snapshot that falls
+behind its log is simply ignored at startup in favor of replay.
+
 ```go
 if err := store.SaveSnapshots(); err != nil {
 	return err

@@ -552,12 +552,22 @@ func (p *Partition) closeWriter() error {
 	p.mu.Lock()
 	if !p.closed {
 		for _, segment := range p.segments {
+			// Sealed segments were checkpointed when they rolled; rewriting
+			// every sidecar here costs four fsyncs per segment and made close
+			// scale with the whole log.
+			if !segment.indexDirty {
+				continue
+			}
 			_ = installSegmentIndexes(segment, p.storeID, p.options.IndexStride)
 		}
 		p.closed = true
 		p.signalFetchWaitersLocked()
 		for _, segment := range p.segments {
-			closeErr = errors.Join(closeErr, segment.file.Close())
+			if segment.file != nil {
+				closeErr = errors.Join(closeErr, segment.file.Close())
+				segment.file = nil
+			}
+			p.forgetSegmentFile(segment.path)
 		}
 	}
 	p.mu.Unlock()

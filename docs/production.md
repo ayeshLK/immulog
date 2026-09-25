@@ -82,10 +82,17 @@ catalog topic. The important bounds are:
 - `TailSlots` and `TailBytes` enable an optional, rebuildable in-memory tail.
 
 `StoreOptions` applies instance-only limits for topics, user partitions, open
-partitions, system-log history, consumer groups, progress keys, tail bytes, and
-disk headroom. These limits are finite safeguards. Lowering a limit on reopen
-does not delete existing durable state; it may instead refuse new growth or
-opening work until a larger operating profile is selected.
+partitions, system-log history, consumer groups, progress keys, tail bytes,
+open segment file descriptors, and disk headroom. These limits are finite
+safeguards. Lowering a limit on reopen does not delete existing durable state;
+it may instead refuse new growth or opening work until a larger operating
+profile is selected.
+
+`MaxOpenSegmentFiles` bounds descriptors held for sealed (immutable) segments
+across the whole store; each open partition separately keeps one writer handle
+for its active segment. A partition's log length does not otherwise bound
+descriptor usage: a reader briefly exceeding the cap while a segment is pinned
+is expected and does not fail the read.
 
 Size a deployment for the worst expected in-flight payload and burst, not only
 average throughput. Include:

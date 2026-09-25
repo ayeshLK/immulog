@@ -15,10 +15,14 @@
 package storage
 
 import (
+	"context"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ayeshLK/immulog/api"
@@ -287,5 +291,85 @@ func TestIndexHeaderOnlyCacheIsValidForEmptySegment(t *testing.T) {
 		if len(data) != int(IndexHeaderBytes) {
 			t.Fatalf("empty index %q has %d bytes, want header-only", filepath.Base(path), len(data))
 		}
+	}
+}
+
+func TestCloseOnlyCheckpointsDirtySegmentIndexes(t *testing.T) {
+	var indexWrites atomic.Int64
+	base := currentFileSystem()
+	counting := base
+	// Count only user-partition sidecars; the two system logs checkpoint
+	// their own active segments during the same close.
+	counting.createTmp = func(directory, pattern string) (*os.File, error) {
+		if strings.HasPrefix(pattern, ".index-") && strings.Contains(directory, string(os.PathSeparator)+"topics"+string(os.PathSeparator)) {
+			indexWrites.Add(1)
+		}
+		return base.createTmp(directory, pattern)
+	}
+	fileSystemMu.Lock()
+	previous := fileSystem
+	fileSystem = counting
+	fileSystemMu.Unlock()
+	t.Cleanup(func() {
+		fileSystemMu.Lock()
+		fileSystem = previous
+		fileSystemMu.Unlock()
+	})
+
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	topic, err := store.CreateTopic("orders", 1, PartitionOptions{SegmentBytes: 1024, BatchBytes: 512, RecordBytes: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partitions, err := store.OpenTopic("orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	partition := partitions[0]
+	for index := range 60 {
+		if _, err := partition.Append(context.Background(), api.AppendRequest{
+			Topic: topic.ID, Partition: 0,
+			Key: []byte(fmt.Sprintf("k-%d", index)), Value: make([]byte, 100),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sealed := len(partition.segments) - 1
+	if sealed < 4 {
+		t.Fatalf("sealed segment count = %d, want at least 4", sealed)
+	}
+	indexWrites.Store(0)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Only the active segment's two sidecars may still be dirty at close.
+	if written := indexWrites.Load(); written > 2 {
+		t.Fatalf("close republished %d index sidecars across %d sealed segments, want at most 2", written, sealed)
+	}
+
+	// The sealed sidecars must still be the ones written when each segment
+	// rolled, so a reopened partition keeps its seek hints.
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := reopened.OpenTopic("orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, segment := range restored[0].segments[:sealed] {
+		if len(segment.offsetIndex) == 0 {
+			t.Fatalf("sealed segment %d lost its offset index", index)
+		}
+		if segment.indexDirty {
+			t.Fatalf("sealed segment %d reloaded as dirty", index)
+		}
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

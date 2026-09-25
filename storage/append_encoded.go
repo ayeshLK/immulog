@@ -82,6 +82,13 @@ func (p *Partition) appendEncodedLocked(batch api.RecordBatch, encoded []byte) (
 		// authoritative append below.
 		_ = installSegmentIndexes(active, p.storeID, p.options.IndexStride)
 		p.segments = append(p.segments, rolled)
+		// The just-sealed segment needs no lasting handle: it is read-only for
+		// the rest of the partition's life, and a future read reopens it
+		// through the store's bounded descriptor cache. Without this, a
+		// long-lived partition that never reopens would still accumulate one
+		// descriptor per roll for as long as the process runs.
+		_ = fileClose(active.file)
+		active.file = nil
 		active = rolled
 	}
 	position := active.size
@@ -112,6 +119,7 @@ func (p *Partition) appendEncodedLocked(batch api.RecordBatch, encoded []byte) (
 		}
 	}
 	p.logEnd = active.end
+	p.extendPrefixDigestLocked(batch.BaseOffset, encoded)
 	refreshSegmentIndexes(active, p.storeID, p.options.IndexStride)
 	p.signalFetchWaitersLocked()
 	if p.tail == nil {
