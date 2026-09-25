@@ -208,6 +208,9 @@ func (options StoreOptions) validate() error {
 	if options.MaxOpenPartitions == 0 || options.MaxOpenPartitions > maxTopicPartitions {
 		return errors.Join(api.ErrResourceLimit, errors.New("store active-partition limit is outside the supported range"))
 	}
+	if options.MaxOpenSegmentFiles == 0 || options.MaxOpenSegmentFiles > maxTopicPartitions {
+		return errors.Join(api.ErrResourceLimit, errors.New("store open segment-file limit is outside the supported range"))
+	}
 	return nil
 }
 

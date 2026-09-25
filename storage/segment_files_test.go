@@ -16,6 +16,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -101,6 +102,18 @@ func TestSegmentFileCacheNeverEvictsAPinnedHandle(t *testing.T) {
 	cache.release(pinnedPath)
 	if err := cache.closeAll(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMaxOpenSegmentFilesRejectsAnUnboundedLimit(t *testing.T) {
+	dir := t.TempDir()
+	// A caller-supplied limit near the top of the uint32 range must be
+	// rejected before newSegmentFileCache ever sees it, rather than reaching
+	// an eager allocation sized off an effectively unbounded value.
+	if _, err := OpenWithOptions(dir, StoreOptions{MaxOpenSegmentFiles: 4_000_000_000}); err == nil {
+		t.Fatal("expected an out-of-range MaxOpenSegmentFiles to be rejected")
+	} else if !errors.Is(err, api.ErrResourceLimit) {
+		t.Fatalf("MaxOpenSegmentFiles rejection = %v, want api.ErrResourceLimit", err)
 	}
 }
 

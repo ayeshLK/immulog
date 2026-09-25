@@ -42,7 +42,12 @@ type segmentFileEntry struct {
 }
 
 func newSegmentFileCache(limit uint32) *segmentFileCache {
-	return &segmentFileCache{limit: int(limit), entries: make(map[string]*segmentFileEntry, limit)}
+	// The map grows lazily rather than pre-sizing to limit: StoreOptions.validate
+	// bounds limit to maxTopicPartitions, but almost no store needs anywhere
+	// near that many cached descriptors, and an unbounded caller (a direct
+	// openPartition test, or a future caller of newSegmentFileCache) should not
+	// pay for an eager allocation proportional to a large configured cap.
+	return &segmentFileCache{limit: int(limit), entries: make(map[string]*segmentFileEntry)}
 }
 
 // acquire pins a read handle for path. Every successful call must be followed

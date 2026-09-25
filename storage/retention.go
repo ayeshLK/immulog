@@ -276,6 +276,12 @@ func planRetentionLocked(partition *Partition, config PartitionConfigV1, nowMill
 		// can be checkpointed without affecting the retention boundary.
 		_ = installSegmentIndexes(active, partition.storeID, partition.options.IndexStride)
 		partition.segments = append(partition.segments, rolled)
+		// An age- or size-driven roll can leave the former active segment
+		// retained (not yet eligible for retirement below); without this it
+		// would keep a live writer handle outside the bounded descriptor
+		// cache for as long as it stays retained, same as an ingress roll.
+		_ = fileClose(active.file)
+		active.file = nil
 		if total > math.MaxUint64-uint64(rolled.size) {
 			return nil, errors.Join(api.ErrResourceLimit, errors.New("retained segment bytes overflow"))
 		}
