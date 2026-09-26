@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`immulog` is a Go 1.26 module for a local, durable, append-only event log.
+`immulog` is a Go 1.25+ module for a local, durable, append-only event log.
 Public contracts and stable domain errors are in `api/`; encoding, segment
 management, locking, partitions, and the store live in `storage/`. Core
 correctness tests are co-located with their package (`*_test.go`); benchmark
@@ -88,8 +88,9 @@ buckets), `config.go` and `capacity.go` (limit defaults and planning).
 
 ## Build, Test, and Development Commands
 
-This is a single Go 1.26 module using the standard Go toolchain; there is no
-separate build system or lint configuration. Linux is the only currently
+This is a single Go module supporting Go 1.25 and Go 1.26 using the standard
+Go toolchain; there is no separate build system or lint configuration. Linux
+is the only currently
 qualified platform because locking and disk-pressure implementations are
 Linux-specific.
 
@@ -293,7 +294,7 @@ see `disk_pressure_test.go` for the pattern.
 ## CI/CD and Repository Automation
 
 Pull requests and pushes to `main` run `.github/workflows/ci.yml` on Linux with
-Go 1.26, source copyright-header checks, formatting, module-tidy, vet, shuffled
+Go 1.25 and Go 1.26, source copyright-header checks, formatting, module-tidy, vet, shuffled
 tests, race tests, and package coverage. Fuzzing and performance evidence are
 manual workflows; use `BENCHMARKS.md` for performance commands, environment
 capture, and interpretation; use the opt-in soak settings documented above
