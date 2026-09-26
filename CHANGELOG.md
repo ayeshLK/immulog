@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.0](https://github.com/ayeshLK/immulog/compare/v0.2.0...v0.3.0) (2026-09-26)
+
+
+### Features
+
+* support native macOS and Windows runtimes ([6b98919](https://github.com/ayeshLK/immulog/commit/6b98919d5629e01414bfb17a54e7f9ef4305c5b1))
+* support native macOS and Windows runtimes ([fe195b0](https://github.com/ayeshLK/immulog/commit/fe195b0578aadd261f72e50c2963ae101901e429))
+
+
+### Bug Fixes
+
+* close temporary snapshots on Windows ([ce6b611](https://github.com/ayeshLK/immulog/commit/ce6b611b4592fce8e297ab8d45d61a833c872004))
+* support directory sync on macOS and Windows ([acbd12b](https://github.com/ayeshLK/immulog/commit/acbd12bc6fdabdbcce37777fc01954e47d86100b))
+
 ## [0.2.0](https://github.com/ayeshLK/immulog/compare/v0.1.0...v0.2.0) (2026-09-26)
 
 
