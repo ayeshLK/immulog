@@ -15,7 +15,6 @@
 package storage
 
 import (
-	"errors"
 	"io/fs"
 	"os"
 	"sync"
@@ -139,11 +138,5 @@ func fileTruncate(file *os.File, size int64) error {
 }
 
 func syncDir(path string) error {
-	directory, err := fsOpen(path)
-	if err != nil {
-		return err
-	}
-	syncErr := fileSync(directory)
-	closeErr := fileClose(directory)
-	return errors.Join(syncErr, closeErr)
+	return syncDirectory(path)
 }
