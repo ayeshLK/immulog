@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -307,7 +308,11 @@ func installCrashAfterFilesystem(operation filesystemOperation, path string, exa
 	case filesystemSync:
 		faulted.sync = func(file *os.File) error {
 			err := base.sync(file)
-			if err == nil {
+			isDirectory := false
+			if info, statErr := file.Stat(); statErr == nil {
+				isDirectory = info.IsDir()
+			}
+			if err == nil || runtime.GOOS == "windows" && isDirectory {
 				crash(file.Name())
 			}
 			return err
