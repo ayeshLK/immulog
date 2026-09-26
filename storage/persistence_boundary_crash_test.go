@@ -273,7 +273,7 @@ func installCrashAfterFilesystem(operation filesystemOperation, path string, exa
 		if exact {
 			actualPath = canonicalFaultPath(actual)
 		}
-		matches := path == "" || exact && actualPath == path || !exact && strings.Contains(actual, path)
+		matches := path == "" || exact && crashPathsMatch(path, actualPath) || !exact && strings.Contains(actual, path)
 		if !matches || skip > 0 {
 			if matches {
 				skip--
@@ -342,6 +342,23 @@ func installCrashAfterFilesystem(operation filesystemOperation, path string, exa
 	fileSystemMu.Lock()
 	fileSystem = faulted
 	fileSystemMu.Unlock()
+}
+
+func crashPathsMatch(expected, actual string) bool {
+	if expected == actual || strings.EqualFold(filepath.Clean(expected), filepath.Clean(actual)) {
+		return true
+	}
+	if expectedInfo, err := os.Stat(expected); err == nil {
+		if actualInfo, err := os.Stat(actual); err == nil && os.SameFile(expectedInfo, actualInfo) {
+			return true
+		}
+	}
+	expectedParts := strings.Split(filepath.ToSlash(filepath.Clean(expected)), "/")
+	actualParts := strings.Split(filepath.ToSlash(filepath.Clean(actual)), "/")
+	if len(expectedParts) < 2 || len(actualParts) < 2 {
+		return false
+	}
+	return strings.EqualFold(strings.Join(expectedParts[len(expectedParts)-2:], "/"), strings.Join(actualParts[len(actualParts)-2:], "/"))
 }
 
 func setupEmptyDirectory(t *testing.T) string {
