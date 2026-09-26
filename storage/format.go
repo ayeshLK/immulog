@@ -14,6 +14,18 @@
 
 // Package storage provides a durable, append-only, partitioned event log and
 // the immutable on-disk format that backs it.
+//
+// Storage is an embedded, local, single-process runtime. A Store exclusively
+// owns one data directory through its stable LOCK file; applications must not
+// open the same directory from another process or remove, replace, or modify
+// that file. The package does not provide replication, failover, network
+// transport, or multi-process coordination.
+//
+// Native Linux, macOS, and Windows CI runs vet, tests, and race tests. An
+// acknowledged append is still conditional on the deployed filesystem and
+// storage device honoring the required write and sync operations. Qualify the
+// exact platform and filesystem used for important data; see the production
+// guide for operational and durability guidance.
 package storage
 
 import (
