@@ -6,9 +6,10 @@ the [usage guide](usage.md) for API examples and the [security policy](../SECURI
 for reporting and security boundaries.
 
 > [!WARNING]
-> Linux is the only currently qualified platform. The project is pre-v1 and
-> does not provide a network protocol, replication, failover, or multi-process
-> coordination.
+> The project is pre-v1. Native Linux, macOS, and Windows builds and tests run
+> in CI; deploy only on platforms whose native qualification checks have passed
+> for the version you use. The library does not provide a network protocol,
+> replication, failover, or multi-process coordination.
 
 ## Use a dedicated data directory
 
@@ -276,7 +277,7 @@ through the private process in [SECURITY.md](../SECURITY.md), not a public issue
 - Assuming consumer commits provide exactly-once external effects.
 - Keeping record byte slices after handing them to an asynchronous component
   without an application-owned copy.
-- Running unqualified non-Linux locking or disk-pressure deployments as if they
+- Running a platform whose native qualification checks have not passed as if it
   had the same guarantees.
 - Calling `Store.Close` while application writers can still append.
 

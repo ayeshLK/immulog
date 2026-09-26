@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 
 	"github.com/ayeshLK/immulog/api"
@@ -81,9 +80,8 @@ func TestPersistenceBoundaryCrashRecovery(t *testing.T) {
 			if !ok {
 				t.Fatalf("crash helper error = %T %v, output=%s", err, err, output)
 			}
-			status, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus)
-			if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
-				t.Fatalf("crash helper status = %#v, output=%s", status, output)
+			if !crashTerminationExpected(exitErr) {
+				t.Fatalf("crash helper status = %#v, output=%s", exitErr.ProcessState, output)
 			}
 			test.verify(t, dir)
 		})
@@ -277,7 +275,7 @@ func installCrashAfterFilesystem(operation filesystemOperation, path string, exa
 			return
 		}
 		mu.Unlock()
-		if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+		if err := terminateCrashHelper(); err != nil {
 			panic(err)
 		}
 	}

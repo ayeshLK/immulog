@@ -1,4 +1,4 @@
-//go:build linux
+//go:build windows
 
 // Copyright 2026 Ayesh Almeida
 //
@@ -21,9 +21,9 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"syscall"
 
 	"github.com/ayeshLK/immulog/api"
+	"golang.org/x/sys/windows"
 )
 
 type dirIdentity struct {
@@ -39,15 +39,12 @@ var directoryOwners struct {
 func init() { directoryOwners.items = make(map[dirIdentity]struct{}) }
 
 func identityOf(file *os.File) (dirIdentity, error) {
-	info, err := file.Stat()
-	if err != nil {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info); err != nil {
 		return dirIdentity{}, err
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return dirIdentity{}, errors.New("unsupported filesystem identity type")
-	}
-	return dirIdentity{device: uint64(stat.Dev), inode: uint64(stat.Ino)}, nil
+	index := uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow)
+	return dirIdentity{device: uint64(info.VolumeSerialNumber), inode: index}, nil
 }
 
 func reserveDirectory(identity dirIdentity) bool {
@@ -67,36 +64,34 @@ func releaseDirectory(identity dirIdentity) {
 }
 
 func acquireLock(path string) (*os.File, error) {
-	fd, err := syscall.Open(path, syscall.O_RDWR|syscall.O_CREAT|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0o600)
+	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		if errors.Is(err, syscall.ELOOP) {
-			return nil, fmt.Errorf("%w: LOCK is a symlink", api.ErrLockUnsupported)
+		return nil, fmt.Errorf("encode LOCK path: %w", err)
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_ALWAYS, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			return nil, api.ErrDataDirLocked
 		}
 		return nil, fmt.Errorf("open LOCK: %w", err)
 	}
-	file := os.NewFile(uintptr(fd), path)
-	if file == nil {
-		_ = syscall.Close(fd)
-		return nil, errors.New("create LOCK file handle")
-	}
-	info, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		_ = windows.CloseHandle(handle)
 		return nil, fmt.Errorf("stat LOCK: %w", err)
 	}
-	if !info.Mode().IsRegular() {
-		_ = file.Close()
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		_ = windows.CloseHandle(handle)
+		return nil, fmt.Errorf("%w: LOCK is a reparse point", api.ErrLockUnsupported)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		_ = windows.CloseHandle(handle)
 		return nil, fmt.Errorf("%w: LOCK is not a regular file", api.ErrLockUnsupported)
 	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = file.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return nil, api.ErrDataDirLocked
-		}
-		if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EOPNOTSUPP) || errors.Is(err, syscall.ENOTSUP) {
-			return nil, fmt.Errorf("%w: flock: %v", api.ErrLockUnsupported, err)
-		}
-		return nil, fmt.Errorf("acquire LOCK: %w", err)
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return nil, errors.New("create LOCK file handle")
 	}
 	return file, nil
 }
@@ -105,7 +100,5 @@ func releaseLock(file *os.File) error {
 	if file == nil {
 		return nil
 	}
-	unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-	closeErr := file.Close()
-	return errors.Join(unlockErr, closeErr)
+	return file.Close()
 }

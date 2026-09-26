@@ -14,9 +14,10 @@ and reopens with conservative recovery after a process restart.
 
 > [!WARNING]
 > `immulog` is pre-v1. The public API and on-disk format are still evolving.
-> Linux is the only currently qualified platform. Review the [usage
-> guide](docs/usage.md) and [production guide](docs/production.md) before using
-> it for important data.
+> Native Linux, macOS, and Windows builds and test jobs are covered by CI.
+> Review the [usage guide](docs/usage.md) and [production guide](docs/production.md)
+> before using it for important data; durability qualification remains tied to
+> the platform-specific CI results for the commit you deploy.
 
 ## Why use immulog?
 

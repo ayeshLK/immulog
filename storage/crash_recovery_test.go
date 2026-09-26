@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"syscall"
 	"testing"
 
 	"github.com/ayeshLK/immulog/api"
@@ -56,9 +55,8 @@ func TestProcessCrashRecovery(t *testing.T) {
 		if !ok {
 			t.Fatalf("crash helper error = %T %v, output=%s", err, err, output)
 		}
-		status, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus)
-		if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
-			t.Fatalf("crash helper status = %#v, output=%s", status, output)
+		if !crashTerminationExpected(exitErr) {
+			t.Fatalf("crash helper status = %#v, output=%s", exitErr.ProcessState, output)
 		}
 
 		verifyCrashedRecords(t, dir, expected)
@@ -89,7 +87,7 @@ func runProcessCrashHelper() {
 		fmt.Fprintf(os.Stderr, "append crash record: %v\n", err)
 		os.Exit(2)
 	}
-	if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+	if err := terminateCrashHelper(); err != nil {
 		fmt.Fprintf(os.Stderr, "kill crash helper: %v\n", err)
 		os.Exit(2)
 	}
