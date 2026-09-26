@@ -46,7 +46,7 @@ requests.
 
 ## Install
 
-`immulog` requires Go 1.26 or newer. Until the first tagged release, pin a
+`immulog` requires Go 1.25 or newer. Until the first tagged release, pin a
 reviewed commit or use the current module version during development:
 
 ```sh

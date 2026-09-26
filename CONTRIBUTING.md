@@ -15,9 +15,9 @@ when participating in issues, pull requests, and reviews.
 
 ## Development setup
 
-Install Go 1.26 or newer. The repository is a Linux-focused, single-node Go
+Install Go 1.25 or newer. The repository is a Linux-focused, single-node Go
 module; non-Linux locking and disk-pressure implementations are not currently
-qualified.
+qualified. Changes must remain compatible with both Go 1.25 and Go 1.26.
 
 ## Validate changes
 
