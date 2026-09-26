@@ -262,11 +262,18 @@ func crashHelperFailure(message string) {
 }
 
 func installCrashAfterFilesystem(operation filesystemOperation, path string, exact bool, skip int) {
+	if exact {
+		path = canonicalFaultPath(path)
+	}
 	base := operatingSystemFileSystem()
 	var mu sync.Mutex
 	crash := func(actual string) {
 		mu.Lock()
-		matches := path == "" || exact && actual == path || !exact && strings.Contains(actual, path)
+		actualPath := actual
+		if exact {
+			actualPath = canonicalFaultPath(actual)
+		}
+		matches := path == "" || exact && actualPath == path || !exact && strings.Contains(actual, path)
 		if !matches || skip > 0 {
 			if matches {
 				skip--

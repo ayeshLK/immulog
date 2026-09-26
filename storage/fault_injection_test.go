@@ -103,6 +103,10 @@ func canonicalFaultPath(path string) string {
 	if err == nil {
 		return canonical
 	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err == nil {
+		return filepath.Join(parent, filepath.Base(path))
+	}
 	return path
 }
 
