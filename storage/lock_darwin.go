@@ -1,4 +1,4 @@
-//go:build linux
+//go:build darwin
 
 // Copyright 2026 Ayesh Almeida
 //
@@ -105,7 +105,5 @@ func releaseLock(file *os.File) error {
 	if file == nil {
 		return nil
 	}
-	unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-	closeErr := file.Close()
-	return errors.Join(unlockErr, closeErr)
+	return errors.Join(syscall.Flock(int(file.Fd()), syscall.LOCK_UN), file.Close())
 }

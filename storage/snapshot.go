@@ -280,7 +280,11 @@ func publishSnapshot(path string, data []byte) error {
 	}
 	temporaryPath := temporary.Name()
 	keep := false
+	closed := false
 	defer func() {
+		if !closed {
+			_ = fileClose(temporary)
+		}
 		if !keep {
 			_ = fsRemove(temporaryPath)
 		}
@@ -294,6 +298,7 @@ func publishSnapshot(path string, data []byte) error {
 	if err := fileClose(temporary); err != nil {
 		return err
 	}
+	closed = true
 	if err := fsRename(temporaryPath, path); err != nil {
 		return err
 	}

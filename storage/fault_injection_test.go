@@ -75,6 +75,7 @@ func (plan *filesystemFaultPlan) failOnce(operation filesystemOperation, path st
 }
 
 func (plan *filesystemFaultPlan) failOnceExact(operation filesystemOperation, path string, err error) {
+	path = canonicalFaultPath(path)
 	plan.mu.Lock()
 	plan.armed = true
 	plan.operation = operation
@@ -86,6 +87,7 @@ func (plan *filesystemFaultPlan) failOnceExact(operation filesystemOperation, pa
 }
 
 func (plan *filesystemFaultPlan) failOnceExactAfter(operation filesystemOperation, path string, skip int, err error) {
+	path = canonicalFaultPath(path)
 	plan.mu.Lock()
 	plan.armed = true
 	plan.operation = operation
@@ -94,6 +96,18 @@ func (plan *filesystemFaultPlan) failOnceExactAfter(operation filesystemOperatio
 	plan.skip = skip
 	plan.action = filesystemFaultAction{err: err}
 	plan.mu.Unlock()
+}
+
+func canonicalFaultPath(path string) string {
+	canonical, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return canonical
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err == nil {
+		return filepath.Join(parent, filepath.Base(path))
+	}
+	return path
 }
 
 func (plan *filesystemFaultPlan) shortWriteOnce(operation filesystemOperation, path string) {

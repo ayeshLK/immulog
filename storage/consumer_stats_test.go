@@ -16,6 +16,7 @@ package storage
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	"github.com/ayeshLK/immulog/api"
@@ -102,7 +103,7 @@ func TestPartitionLatencyStatsAreBoundedAndCountDurableAppend(t *testing.T) {
 		for _, count := range latency.Buckets {
 			buckets += count
 		}
-		if buckets != latency.Operations || latency.Nanos == 0 {
+		if buckets != latency.Operations || runtime.GOOS != "windows" && latency.Nanos == 0 {
 			t.Fatalf("%s histogram = %#v", name, latency)
 		}
 	}

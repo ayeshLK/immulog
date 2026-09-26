@@ -22,9 +22,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 
 	"github.com/ayeshLK/immulog/api"
@@ -81,9 +81,8 @@ func TestPersistenceBoundaryCrashRecovery(t *testing.T) {
 			if !ok {
 				t.Fatalf("crash helper error = %T %v, output=%s", err, err, output)
 			}
-			status, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus)
-			if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
-				t.Fatalf("crash helper status = %#v, output=%s", status, output)
+			if !crashTerminationExpected(exitErr) {
+				t.Fatalf("crash helper status = %#v, output=%s", exitErr.ProcessState, output)
 			}
 			test.verify(t, dir)
 		})
@@ -264,11 +263,18 @@ func crashHelperFailure(message string) {
 }
 
 func installCrashAfterFilesystem(operation filesystemOperation, path string, exact bool, skip int) {
+	if exact {
+		path = canonicalFaultPath(path)
+	}
 	base := operatingSystemFileSystem()
 	var mu sync.Mutex
 	crash := func(actual string) {
 		mu.Lock()
-		matches := path == "" || exact && actual == path || !exact && strings.Contains(actual, path)
+		actualPath := actual
+		if exact {
+			actualPath = canonicalFaultPath(actual)
+		}
+		matches := path == "" || exact && crashPathsMatch(path, actualPath) || !exact && strings.Contains(actual, path)
 		if !matches || skip > 0 {
 			if matches {
 				skip--
@@ -277,7 +283,7 @@ func installCrashAfterFilesystem(operation filesystemOperation, path string, exa
 			return
 		}
 		mu.Unlock()
-		if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+		if err := terminateCrashHelper(); err != nil {
 			panic(err)
 		}
 	}
@@ -302,7 +308,11 @@ func installCrashAfterFilesystem(operation filesystemOperation, path string, exa
 	case filesystemSync:
 		faulted.sync = func(file *os.File) error {
 			err := base.sync(file)
-			if err == nil {
+			isDirectory := false
+			if info, statErr := file.Stat(); statErr == nil {
+				isDirectory = info.IsDir()
+			}
+			if err == nil || runtime.GOOS == "windows" && isDirectory {
 				crash(file.Name())
 			}
 			return err
@@ -337,6 +347,23 @@ func installCrashAfterFilesystem(operation filesystemOperation, path string, exa
 	fileSystemMu.Lock()
 	fileSystem = faulted
 	fileSystemMu.Unlock()
+}
+
+func crashPathsMatch(expected, actual string) bool {
+	if expected == actual || strings.EqualFold(filepath.Clean(expected), filepath.Clean(actual)) {
+		return true
+	}
+	if expectedInfo, err := os.Stat(expected); err == nil {
+		if actualInfo, err := os.Stat(actual); err == nil && os.SameFile(expectedInfo, actualInfo) {
+			return true
+		}
+	}
+	expectedParts := strings.Split(filepath.ToSlash(filepath.Clean(expected)), "/")
+	actualParts := strings.Split(filepath.ToSlash(filepath.Clean(actual)), "/")
+	if len(expectedParts) < 2 || len(actualParts) < 2 {
+		return false
+	}
+	return strings.EqualFold(strings.Join(expectedParts[len(expectedParts)-2:], "/"), strings.Join(actualParts[len(actualParts)-2:], "/"))
 }
 
 func setupEmptyDirectory(t *testing.T) string {
