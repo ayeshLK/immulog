@@ -1,4 +1,10 @@
-# immulog
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/immulog-logo-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/brand/immulog-logo.png">
+    <img src="docs/brand/immulog-logo.png" alt="immulog" width="620">
+  </picture>
+</p>
 
 <p align="center">
   <a href="https://pkg.go.dev/github.com/ayeshLK/immulog"><img src="https://pkg.go.dev/badge/github.com/ayeshLK/immulog.svg" alt="Go Reference"></a>
