@@ -39,29 +39,30 @@ type Store struct {
 	closeMu sync.Mutex
 	// snapshotMu serializes snapshot publication and keeps it from racing a
 	// close that is about to release directory ownership.
-	snapshotMu       sync.Mutex
-	retentionMu      sync.Mutex
-	retentionStop    chan struct{}
-	retentionWake    chan struct{}
-	retentionDone    chan struct{}
-	retentionStopped atomic.Bool
-	retentionStarted atomic.Bool
-	mu               sync.Mutex
-	closing          atomic.Bool
-	rootPath         string
-	root             *os.File
-	lock             *os.File
-	identity         dirIdentity
-	storeID          StoreID
-	partitions       map[partitionKey]*Partition
-	catalog          *Partition
-	offsets          *Partition
-	tailBudget       *tailBudget
-	segmentFiles     *segmentFileCache
-	disk             *diskPressureLedger
-	options          StoreOptions
-	catalogState     *catalogProjection
-	catalogAdmission chan struct{}
+	snapshotMu          sync.Mutex
+	retentionMu         sync.Mutex
+	retentionStop       chan struct{}
+	retentionWake       chan struct{}
+	retentionDone       chan struct{}
+	retentionStopped    atomic.Bool
+	retentionStarted    atomic.Bool
+	mu                  sync.Mutex
+	closing             atomic.Bool
+	rootPath            string
+	root                *os.File
+	lock                *os.File
+	identity            dirIdentity
+	storeID             StoreID
+	partitions          map[partitionKey]*Partition
+	retentionPartitions map[partitionKey]retentionPartitionRegistration
+	catalog             *Partition
+	offsets             *Partition
+	tailBudget          *tailBudget
+	segmentFiles        *segmentFileCache
+	disk                *diskPressureLedger
+	options             StoreOptions
+	catalogState        *catalogProjection
+	catalogAdmission    chan struct{}
 	// catalogAppend is a deterministic test seam for uncertain metadata writes.
 	catalogAppend func(api.RecordBatch) (uint64, error)
 	// offsetsAppend is a deterministic test seam for uncertain offsets writes.
@@ -86,6 +87,11 @@ type partitionKey struct {
 	partition uint32
 }
 
+type retentionPartitionRegistration struct {
+	partition *Partition
+	retiring  bool
+}
+
 // StoreOptions controls non-persistent, instance-wide operating limits.
 type StoreOptions struct {
 	// TailBytes bounds all optional partition-tail entries held by this Store.
@@ -98,8 +104,9 @@ type StoreOptions struct {
 	// MaxUserPartitions caps catalog-owned user partitions across all topics.
 	// Zero selects the finite default and does not change persisted topic state.
 	MaxUserPartitions uint32
-	// MaxOpenPartitions caps active user-partition writers/rings. Zero selects
-	// the finite default and does not limit durable catalog history.
+	// MaxOpenPartitions caps active user-partition writers/rings, including
+	// temporary retention maintenance opens. Zero selects the finite default
+	// and does not limit durable catalog history.
 	MaxOpenPartitions uint32
 	// MaxOpenSegmentFiles caps descriptors held for sealed segments across this
 	// store. Each open partition also keeps one writer handle for its active
@@ -292,6 +299,27 @@ func admitOpenPartitions(current int, needed, limit uint32) error {
 	return nil
 }
 
+func (s *Store) claimPartitionLocked(key partitionKey) (*Partition, error) {
+	partition := s.partitions[key]
+	if partition == nil {
+		return nil, nil
+	}
+	registration, temporary := s.retentionPartitions[key]
+	if !temporary || registration.partition != partition {
+		return partition, nil
+	}
+	if registration.retiring {
+		return nil, errors.Join(api.ErrConcurrentOperation, errors.New("partition retention teardown is in progress"))
+	}
+	delete(s.retentionPartitions, key)
+	return partition, nil
+}
+
+func (s *Store) partitionRetiringLocked(key partitionKey) bool {
+	registration, exists := s.retentionPartitions[key]
+	return exists && registration.retiring && s.partitions[key] == registration.partition
+}
+
 // Open acquires exclusive ownership with the default finite operating profile.
 // LOCK is stable and is never removed, renamed, truncated, or replaced.
 func Open(dir string) (*Store, error) {
@@ -379,7 +407,7 @@ func OpenWithOptions(dir string, options StoreOptions) (*Store, error) {
 	}
 	store := &Store{
 		rootPath: rootPath, root: root, lock: lock, identity: identity,
-		storeID: metadata.projection.storeID, partitions: make(map[partitionKey]*Partition), tailBudget: newTailBudget(options.TailBytes), disk: disk,
+		storeID: metadata.projection.storeID, partitions: make(map[partitionKey]*Partition), retentionPartitions: make(map[partitionKey]retentionPartitionRegistration), tailBudget: newTailBudget(options.TailBytes), disk: disk,
 		segmentFiles: newSegmentFileCache(options.MaxOpenSegmentFiles),
 		options:      options,
 		catalog:      metadata.catalog, offsets: metadata.offsets, catalogState: metadata.projection, catalogAdmission: make(chan struct{}, 1), offsetsState: metadata.offsetsState, consumers: make(map[string]*Consumer), groupConsumers: make(map[string]*GroupConsumer), expiredGroups: make(map[string]bool), offsetsAdmission: make(chan struct{}, 1), snapshotDiagnostics: metadata.snapshotDiagnostics,
@@ -459,7 +487,11 @@ func (s *Store) OpenPartition(topic api.TopicID, partition uint32, options Parti
 		options.InitialOffset = descriptor.RetainedL
 		options.TailSlots, options.TailBytes = tailSlots, tailBytes
 	}
-	if existing := s.partitions[key]; existing != nil {
+	existing, err := s.claimPartitionLocked(key)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
 		return existing, nil
 	}
 	if err := admitOpenPartitions(len(s.partitions), 1, s.options.MaxOpenPartitions); err != nil {

@@ -162,7 +162,13 @@ if err := store.RunRetention(ctx); err != nil {
 }
 ```
 
-Configured retention also starts the store's bounded maintenance worker. Treat
+Configured retention also starts the store's bounded maintenance worker.
+Maintenance of a catalog partition that is not already open borrows one
+`MaxOpenPartitions` slot and releases it before moving to the next partition.
+If application-owned partitions occupy every slot, `RunRetention` returns
+`api.ErrResourceLimit` for unopened partitions rather than exceeding the cap or
+evicting an application handle. Leave maintenance headroom in that limit when
+retention must cover more partitions than the application keeps open. Treat
 `RunRetention` errors as operational evidence and inspect `Store.Stats` before
 trying to change policy.
 
