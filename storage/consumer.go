@@ -464,7 +464,11 @@ func (s *Store) openConsumerPartitionLocked(key topicKey) (*Partition, error) {
 		return nil, errors.Join(api.ErrInvalidArgument, errors.New("consumer partition is not in the catalog topic"))
 	}
 	partitionKey := partitionKey{topic: key.topic, partition: key.partition}
-	if existing := s.partitions[partitionKey]; existing != nil {
+	existing, err := s.claimPartitionLocked(partitionKey)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
 		return existing, nil
 	}
 	if err := admitOpenPartitions(len(s.partitions), 1, s.options.MaxOpenPartitions); err != nil {

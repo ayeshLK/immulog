@@ -20,6 +20,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -380,6 +381,340 @@ func TestRetentionUnknownCatalogOutcomePreservesRetiredArtifacts(t *testing.T) {
 	if err != nil || len(result.Records) != 1 || result.Records[0].Offset != 0 {
 		t.Fatalf("recovered records after uncertain catalog outcome = %#v, %v", result, err)
 	}
+}
+
+func TestRetentionHonorsOpenPartitionLimitAcrossCatalogPartitions(t *testing.T) {
+	dir, descriptor := prepareRetentionLimitFixture(t, 2)
+	store, err := OpenWithOptions(dir, StoreOptions{MaxTopics: 1, MaxUserPartitions: 2, MaxOpenPartitions: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if err := store.runRetentionAt(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.DescribeTopic(descriptor.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, partition := range updated.Partitions {
+		if partition.RetainedL != 1 {
+			t.Fatalf("partition %d retained L = %d, want 1", index, partition.RetainedL)
+		}
+	}
+	for pass := 0; pass < 3; pass++ {
+		if err := store.runRetentionAt(context.Background(), time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		stats, err := store.Stats()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stats.OpenPartitions != 0 {
+			t.Fatalf("pass %d open partitions = %d, want 0", pass, stats.OpenPartitions)
+		}
+		store.mu.Lock()
+		temporary := len(store.retentionPartitions)
+		store.mu.Unlock()
+		if temporary != 0 {
+			t.Fatalf("pass %d temporary retention partitions = %d, want 0", pass, temporary)
+		}
+	}
+}
+
+func TestBackgroundRetentionHonorsOpenPartitionLimitAcrossCatalogPartitions(t *testing.T) {
+	dir, descriptor := prepareRetentionLimitFixtureWithCheck(t, 2, time.Millisecond)
+	store, err := OpenWithOptions(dir, StoreOptions{MaxTopics: 1, MaxUserPartitions: 2, MaxOpenPartitions: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		updated, err := store.DescribeTopic(descriptor.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stats, err := store.Stats()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.Partitions[0].RetainedL == 1 && updated.Partitions[1].RetainedL == 1 && stats.OpenPartitions == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("background retention state = L[%d %d], open=%d", updated.Partitions[0].RetainedL, updated.Partitions[1].RetainedL, stats.OpenPartitions)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestRetentionReportsFullOpenPartitionLimitWithoutEviction(t *testing.T) {
+	dir, descriptor := prepareRetentionLimitFixture(t, 2)
+	store, err := OpenWithOptions(dir, StoreOptions{MaxTopics: 1, MaxUserPartitions: 2, MaxOpenPartitions: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	opened, err := store.OpenPartition(descriptor.ID, 0, PartitionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.runRetentionAt(context.Background(), time.Now()); !errors.Is(err, api.ErrResourceLimit) {
+		t.Fatalf("retention error = %v, want ErrResourceLimit", err)
+	}
+	if _, err := opened.EndOffset(); err != nil {
+		t.Fatalf("public partition after retention = %v", err)
+	}
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.OpenPartitions != 1 {
+		t.Fatalf("open partitions = %d, want 1", stats.OpenPartitions)
+	}
+	updated, err := store.DescribeTopic(descriptor.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Partitions[0].RetainedL != 1 || updated.Partitions[1].RetainedL != 0 {
+		t.Fatalf("retained boundaries = [%d %d], want [1 0]", updated.Partitions[0].RetainedL, updated.Partitions[1].RetainedL)
+	}
+}
+
+func TestRetentionPartitionPublicAdoptionPreventsCleanup(t *testing.T) {
+	tests := []struct {
+		name    string
+		acquire func(*testing.T, *Store, TopicDescriptor) func()
+	}{
+		{
+			name: "partition",
+			acquire: func(t *testing.T, store *Store, descriptor TopicDescriptor) func() {
+				t.Helper()
+				if _, err := store.OpenPartition(descriptor.ID, 0, PartitionOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				return func() {}
+			},
+		},
+		{
+			name: "topic",
+			acquire: func(t *testing.T, store *Store, descriptor TopicDescriptor) func() {
+				t.Helper()
+				if _, err := store.OpenTopic(descriptor.Name); err != nil {
+					t.Fatal(err)
+				}
+				return func() {}
+			},
+		},
+		{
+			name: "consumer",
+			acquire: func(t *testing.T, store *Store, descriptor TopicDescriptor) func() {
+				t.Helper()
+				consumer, err := store.OpenConsumer(context.Background(), "retention-adoption", descriptor.ID, 0, api.ConsumerOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return func() {
+					if err := consumer.Close(); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+		{
+			name: "group consumer",
+			acquire: func(t *testing.T, store *Store, descriptor TopicDescriptor) func() {
+				t.Helper()
+				consumer, err := store.OpenConsumerGroup(context.Background(), "retention-group-adoption", []api.ConsumerGroupMember{{
+					Subscriptions: []api.TopicPartition{{Topic: descriptor.ID, Partition: 0}},
+				}}, api.ConsumerGroupOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return func() {
+					if err := consumer.Close(); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir, descriptor := prepareRetentionLimitFixture(t, 1)
+			store, err := OpenWithOptions(dir, StoreOptions{MaxTopics: 1, MaxUserPartitions: 1, MaxOpenPartitions: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			key := partitionKey{topic: descriptor.ID, partition: 0}
+			maintenance, temporary, err := store.openRetentionPartition(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !temporary {
+				t.Fatal("retention partition was not temporary")
+			}
+			closeHandle := test.acquire(t, store, descriptor)
+			defer closeHandle()
+			if err := store.releaseRetentionPartition(key, maintenance); err != nil {
+				t.Fatal(err)
+			}
+			store.mu.Lock()
+			claimed := store.partitions[key]
+			_, stillTemporary := store.retentionPartitions[key]
+			store.mu.Unlock()
+			if claimed != maintenance || stillTemporary {
+				t.Fatalf("claimed partition = %p, temporary = %t, want %p, false", claimed, stillTemporary, maintenance)
+			}
+			if _, err := maintenance.EndOffset(); err != nil {
+				t.Fatalf("adopted partition = %v", err)
+			}
+		})
+	}
+}
+
+func TestRetentionPartitionRetirementFencesConcurrentPublicOpen(t *testing.T) {
+	dir, descriptor := prepareRetentionLimitFixture(t, 1)
+	store, err := OpenWithOptions(dir, StoreOptions{MaxTopics: 1, MaxUserPartitions: 1, MaxOpenPartitions: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	key := partitionKey{topic: descriptor.ID, partition: 0}
+	maintenance, temporary, err := store.openRetentionPartition(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !temporary {
+		t.Fatal("retention partition was not temporary")
+	}
+
+	maintenance.queueMu.Lock()
+	released := make(chan error, 1)
+	go func() {
+		released <- store.releaseRetentionPartition(key, maintenance)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		store.mu.Lock()
+		registration := store.retentionPartitions[key]
+		retiring := registration.partition == maintenance && registration.retiring
+		store.mu.Unlock()
+		if retiring {
+			break
+		}
+		if time.Now().After(deadline) {
+			maintenance.queueMu.Unlock()
+			t.Fatal("retention partition did not enter retiring state")
+		}
+		runtime.Gosched()
+	}
+	if _, err := store.OpenPartition(descriptor.ID, 0, PartitionOptions{}); !errors.Is(err, api.ErrConcurrentOperation) {
+		maintenance.queueMu.Unlock()
+		t.Fatalf("open during retirement error = %v, want ErrConcurrentOperation", err)
+	}
+	maintenance.queueMu.Unlock()
+	select {
+	case err := <-released:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("retention partition cleanup did not finish")
+	}
+
+	opened, err := store.OpenPartition(descriptor.ID, 0, PartitionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened == maintenance {
+		t.Fatal("public open reused the retired partition")
+	}
+	if _, err := opened.EndOffset(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRetentionFailureReleasesTemporaryPartition(t *testing.T) {
+	dir, descriptor := prepareRetentionLimitFixture(t, 1)
+	store, err := OpenWithOptions(dir, StoreOptions{MaxTopics: 1, MaxUserPartitions: 1, MaxOpenPartitions: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	injected := errors.New("injected retention catalog append failure")
+	store.catalogAppend = func(api.RecordBatch) (uint64, error) {
+		return 0, injected
+	}
+	if err := store.runRetentionAt(context.Background(), time.Now()); !errors.Is(err, injected) {
+		t.Fatalf("retention error = %v, want injected failure", err)
+	}
+	store.catalogAppend = nil
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.OpenPartitions != 0 {
+		t.Fatalf("open partitions after failed retention = %d, want 0", stats.OpenPartitions)
+	}
+	store.mu.Lock()
+	temporary := len(store.retentionPartitions)
+	store.mu.Unlock()
+	if temporary != 0 {
+		t.Fatalf("temporary retention partitions after failure = %d, want 0", temporary)
+	}
+	opened, err := store.OpenPartition(descriptor.ID, 0, PartitionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := opened.EndOffset(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func prepareRetentionLimitFixture(t *testing.T, partitionCount uint32) (string, TopicDescriptor) {
+	t.Helper()
+	return prepareRetentionLimitFixtureWithCheck(t, partitionCount, time.Hour)
+}
+
+func prepareRetentionLimitFixtureWithCheck(t *testing.T, partitionCount uint32, retentionCheck time.Duration) (string, TopicDescriptor) {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := OpenWithOptions(dir, StoreOptions{MaxTopics: 1, MaxUserPartitions: partitionCount, MaxOpenPartitions: partitionCount})
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := store.CreateTopic("retention-limit", partitionCount, PartitionOptions{
+		RecordBytes: 512, BatchBytes: 600, BatchRecords: 1, SegmentBytes: 700,
+		RetentionSizeEnabled: true, RetentionBytes: 0, RetentionCheck: retentionCheck,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	partitions, err := store.OpenTopic(descriptor.Name)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	for index, partition := range partitions {
+		if _, err := partition.Append(context.Background(), api.AppendRequest{
+			Topic: descriptor.ID, Partition: uint32(index), Value: bytes.Repeat([]byte("x"), 400),
+		}); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return dir, descriptor
 }
 
 func TestTimeRetentionDoesNotExpireFutureTimestamp(t *testing.T) {

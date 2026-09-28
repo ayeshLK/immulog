@@ -88,9 +88,13 @@ func (store *Store) runRetentionAt(ctx context.Context, now time.Time) error {
 			if err := ctx.Err(); err != nil {
 				return errors.Join(result, err)
 			}
-			opened, err := store.openRetentionPartition(descriptor.ID, partition.Partition)
+			key := partitionKey{topic: descriptor.ID, partition: partition.Partition}
+			opened, temporary, err := store.openRetentionPartition(key)
 			if err == nil {
 				err = store.retainPartitionAt(opened, now)
+				if temporary {
+					err = errors.Join(err, store.releaseRetentionPartition(key, opened))
+				}
 			}
 			result = errors.Join(result, err)
 		}
@@ -98,42 +102,71 @@ func (store *Store) runRetentionAt(ctx context.Context, now time.Time) error {
 	return result
 }
 
-func (store *Store) openRetentionPartition(topicID api.TopicID, partitionID uint32) (*Partition, error) {
-	key := partitionKey{topic: topicID, partition: partitionID}
+func (store *Store) openRetentionPartition(key partitionKey) (*Partition, bool, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.closed {
-		return nil, api.ErrClosed
+		return nil, false, api.ErrClosed
 	}
 	if store.closing.Load() {
-		return nil, api.ErrClosing
+		return nil, false, api.ErrClosing
 	}
 	if store.metadataUnavailable {
-		return nil, api.ErrMetadataUnavailable
+		return nil, false, api.ErrMetadataUnavailable
+	}
+	if store.partitionRetiringLocked(key) {
+		return nil, false, errors.Join(api.ErrConcurrentOperation, errors.New("partition retention teardown is in progress"))
 	}
 	if existing := store.partitions[key]; existing != nil {
-		return existing, nil
+		return existing, false, nil
 	}
-	topic := store.catalogState.topicsByID[topicID]
-	if topic == nil || partitionID >= uint32(len(topic.descriptor.Partitions)) {
-		return nil, api.ErrUnknownTopic
+	topic := store.catalogState.topicsByID[key.topic]
+	if topic == nil || key.partition >= uint32(len(topic.descriptor.Partitions)) {
+		return nil, false, api.ErrUnknownTopic
 	}
-	descriptor := topic.descriptor.Partitions[partitionID]
+	if err := admitOpenPartitions(len(store.partitions), 1, store.options.MaxOpenPartitions); err != nil {
+		return nil, false, err
+	}
+	descriptor := topic.descriptor.Partitions[key.partition]
 	options := descriptor.Config.options()
 	options.InitialOffset = descriptor.RetainedL
-	partitionDir := filepath.Join(store.rootPath, "topics", topicID.String(), fmt.Sprintf("%d", partitionID))
-	opened, err := openPartition(partitionDir, topicID, partitionID, options, store.storeID)
+	partitionDir := filepath.Join(store.rootPath, "topics", key.topic.String(), fmt.Sprintf("%d", key.partition))
+	opened, err := openPartition(partitionDir, key.topic, key.partition, options, store.storeID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := validateRetainedAnchor(opened, descriptor); err != nil {
 		_ = opened.Close()
-		return nil, err
+		return nil, false, err
 	}
 	opened.store = store
 	store.attachTailBudget(opened)
 	store.partitions[key] = opened
-	return opened, nil
+	store.retentionPartitions[key] = retentionPartitionRegistration{partition: opened}
+	return opened, true, nil
+}
+
+func (store *Store) releaseRetentionPartition(key partitionKey, partition *Partition) error {
+	store.mu.Lock()
+	registration, temporary := store.retentionPartitions[key]
+	if !temporary || registration.partition != partition || store.partitions[key] != partition {
+		store.mu.Unlock()
+		return nil
+	}
+	registration.retiring = true
+	store.retentionPartitions[key] = registration
+	store.mu.Unlock()
+
+	closeErr := partition.Close()
+
+	store.mu.Lock()
+	registration, temporary = store.retentionPartitions[key]
+	if temporary && registration.partition == partition && store.partitions[key] == partition {
+		delete(store.retentionPartitions, key)
+		delete(store.partitions, key)
+	}
+	store.mu.Unlock()
+	return closeErr
 }
 
 func validateRetainedAnchor(partition *Partition, descriptor TopicPartition) error {

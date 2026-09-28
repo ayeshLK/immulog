@@ -562,6 +562,9 @@ func (store *Store) OpenTopic(name string) ([]*Partition, error) {
 	var missing uint32
 	for index := range topic.descriptor.Partitions {
 		key := partitionKey{topic: topic.descriptor.ID, partition: uint32(index)}
+		if store.partitionRetiringLocked(key) {
+			return nil, errors.Join(api.ErrConcurrentOperation, errors.New("partition retention teardown is in progress"))
+		}
 		if store.partitions[key] == nil {
 			missing++
 		}
@@ -572,7 +575,11 @@ func (store *Store) OpenTopic(name string) ([]*Partition, error) {
 	result := make([]*Partition, len(topic.descriptor.Partitions))
 	for index, descriptor := range topic.descriptor.Partitions {
 		key := partitionKey{topic: topic.descriptor.ID, partition: uint32(index)}
-		if existing := store.partitions[key]; existing != nil {
+		existing, err := store.claimPartitionLocked(key)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
 			result[index] = existing
 			continue
 		}
