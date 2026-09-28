@@ -191,14 +191,20 @@ rather than inferring them. Do not include local evidence-directory
 paths or filesystem/device details in checked-in result entries; preserve
 those in the run artifacts when useful. Retain only results comparable to the
 current benchmark framework. At this checkpoint, keep the 2026-09-20
-microbenchmark and 2026-09-25 sustained-soak results; remove obsolete results
-when the framework has materially evolved. Do not commit raw run artifacts.
+microbenchmark results and the 2026-09-25 and 2026-09-27–28 sustained-soak
+results; remove obsolete results
+when the framework has materially evolved. The 2026-09-27–28 evidence contains
+three valid sustained runs at commit `aa62d74`, each with zero sampled backlog
+slope and no assignment loss; it is local stability evidence near 942
+acknowledged records/s, not a capacity claim. Do not commit raw run artifacts.
 
 The current soak warmup path invokes one `runSoakCycle`, which can return at
 the reopen interval before a longer configured warmup elapses. Do not treat
 `warmup_nanos` alone as proof of elapsed warmup; confirm timestamps or use a
 configuration/code path that completes the intended warmup before recording
-qualification evidence.
+qualification evidence. The 2026-09-27–28 runs requested 30 minutes but
+actually warmed up for about one 10-minute reopen cycle; use their reported
+measurement-only durations for rate comparisons.
 
 A sustained no-churn run that reports consumer assignment loss without a
 replacement is a failed liveness run, not throughput evidence. The soak's
