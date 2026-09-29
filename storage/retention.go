@@ -240,7 +240,7 @@ func (store *Store) retainPartitionAt(partition *Partition, now time.Time) error
 		if err != nil {
 			return nil, err
 		}
-		if err := systemEventAdmission(store.catalog, api.ClusterMetadataTopicID, store.catalog.logEnd, value, store.options.MaxCatalogHistoryBytes); err != nil {
+		if err := systemEventAdmission(store.catalog, api.ClusterMetadataTopicID(), store.catalog.logEnd, value, store.options.MaxCatalogHistoryBytes); err != nil {
 			return nil, err
 		}
 		appendCatalog := store.catalog.AppendBatch
@@ -249,8 +249,8 @@ func (store *Store) retainPartitionAt(partition *Partition, now time.Time) error
 		}
 		catalogOffset := store.catalog.logEnd
 		_, err = appendCatalog(api.RecordBatch{
-			Topic: api.ClusterMetadataTopicID, Partition: 0, BaseOffset: catalogOffset,
-			Records: []api.Record{{Topic: api.ClusterMetadataTopicID, Partition: 0, Offset: catalogOffset, Value: value}},
+			Topic: api.ClusterMetadataTopicID(), Partition: 0, BaseOffset: catalogOffset,
+			Records: []api.Record{{Topic: api.ClusterMetadataTopicID(), Partition: 0, Offset: catalogOffset, Value: value}},
 		})
 		if err != nil {
 			if errors.Is(err, api.ErrAppendOutcomeUnknown) {
@@ -260,7 +260,7 @@ func (store *Store) retainPartitionAt(partition *Partition, now time.Time) error
 			}
 			return nil, err
 		}
-		if err := store.catalogState.apply(api.Record{Topic: api.ClusterMetadataTopicID, Partition: 0, Offset: catalogOffset, Value: value}); err != nil {
+		if err := store.catalogState.apply(api.Record{Topic: api.ClusterMetadataTopicID(), Partition: 0, Offset: catalogOffset, Value: value}); err != nil {
 			store.metadataUnavailable = true
 			partition.unavailable = true
 			partition.signalFetchWaitersLocked()

@@ -285,7 +285,7 @@ func TestSystemPreflightAllowsVerifiedIncompleteCatalogTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unknown, err := EncodeBatch(testBatch(api.ClusterMetadataTopicID, 0, 1, "unknown"))
+	unknown, err := EncodeBatch(testBatch(api.ClusterMetadataTopicID(), 0, 1, "unknown"))
 	if err != nil {
 		t.Fatal(err)
 	}

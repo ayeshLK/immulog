@@ -78,7 +78,7 @@ func newCatalogProjection() *catalogProjection {
 }
 
 func (projection *catalogProjection) apply(record api.Record) error {
-	eventType, payload, err := decodeSystemEvent(record, api.ClusterMetadataTopicID)
+	eventType, payload, err := decodeSystemEvent(record, api.ClusterMetadataTopicID())
 	if err != nil {
 		return err
 	}
@@ -380,7 +380,7 @@ func (store *Store) createTopic(name string, partitions uint32, options Partitio
 		closePrepared(prepared)
 		return TopicDescriptor{}, err
 	}
-	if err := systemEventAdmission(store.catalog, api.ClusterMetadataTopicID, store.catalog.logEnd, value, store.options.MaxCatalogHistoryBytes); err != nil {
+	if err := systemEventAdmission(store.catalog, api.ClusterMetadataTopicID(), store.catalog.logEnd, value, store.options.MaxCatalogHistoryBytes); err != nil {
 		closePrepared(prepared)
 		return TopicDescriptor{}, err
 	}
@@ -389,8 +389,8 @@ func (store *Store) createTopic(name string, partitions uint32, options Partitio
 		appendCatalog = store.catalogAppend
 	}
 	_, err = appendCatalog(api.RecordBatch{
-		Topic: api.ClusterMetadataTopicID, Partition: 0, BaseOffset: store.catalog.logEnd,
-		Records: []api.Record{{Topic: api.ClusterMetadataTopicID, Partition: 0, Offset: store.catalog.logEnd, Value: value}},
+		Topic: api.ClusterMetadataTopicID(), Partition: 0, BaseOffset: store.catalog.logEnd,
+		Records: []api.Record{{Topic: api.ClusterMetadataTopicID(), Partition: 0, Offset: store.catalog.logEnd, Value: value}},
 	})
 	if err != nil {
 		closePrepared(prepared)
@@ -399,7 +399,7 @@ func (store *Store) createTopic(name string, partitions uint32, options Partitio
 		}
 		return TopicDescriptor{}, err
 	}
-	if err := store.catalogState.apply(api.Record{Topic: api.ClusterMetadataTopicID, Partition: 0, Offset: store.catalog.logEnd - 1, Value: value}); err != nil {
+	if err := store.catalogState.apply(api.Record{Topic: api.ClusterMetadataTopicID(), Partition: 0, Offset: store.catalog.logEnd - 1, Value: value}); err != nil {
 		store.metadataUnavailable = true
 		closePrepared(prepared)
 		return TopicDescriptor{}, errors.Join(api.ErrMetadataUnavailable, err)
@@ -494,7 +494,7 @@ func newTopicID() (api.TopicID, error) {
 	if _, err := rand.Read(id[:]); err != nil {
 		return api.TopicID{}, fmt.Errorf("generate topic ID: %w", err)
 	}
-	if id.IsZero() || id == api.ClusterMetadataTopicID || id == api.ConsumerOffsetsTopicID {
+	if id.IsZero() || id == api.ClusterMetadataTopicID() || id == api.ConsumerOffsetsTopicID() {
 		id[15] ^= 1
 	}
 	return id, nil

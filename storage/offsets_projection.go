@@ -78,7 +78,7 @@ func replayOffsetsHistory(partition *Partition, storeID StoreID, catalog *catalo
 }
 
 func (projection *offsetsProjection) apply(record api.Record, catalog *catalogProjection) error {
-	eventType, payload, err := decodeSystemEvent(record, api.ConsumerOffsetsTopicID)
+	eventType, payload, err := decodeSystemEvent(record, api.ConsumerOffsetsTopicID())
 	if err != nil {
 		return err
 	}

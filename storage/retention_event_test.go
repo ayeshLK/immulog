@@ -54,7 +54,7 @@ func TestRetentionEventReplayValidatesCoverageAndAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := api.Record{Topic: api.ClusterMetadataTopicID, Partition: 0, Offset: store.catalog.logEnd, Value: encoded}
+	record := api.Record{Topic: api.ClusterMetadataTopicID(), Partition: 0, Offset: store.catalog.logEnd, Value: encoded}
 	if err := store.catalogState.apply(record); err != nil {
 		t.Fatal(err)
 	}

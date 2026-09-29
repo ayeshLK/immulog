@@ -67,7 +67,7 @@ func TestProjectionSnapshotsPublishAndCorruptCachesFallBack(t *testing.T) {
 	if _, err := store.DescribeTopic("payments"); err != nil {
 		t.Fatalf("catalog replay with corrupt snapshot: %v", err)
 	}
-	if _, err := store.OpenPartition(api.ClusterMetadataTopicID, 0, PartitionOptions{}); !errors.Is(err, api.ErrInvalidArgument) {
+	if _, err := store.OpenPartition(api.ClusterMetadataTopicID(), 0, PartitionOptions{}); !errors.Is(err, api.ErrInvalidArgument) {
 		t.Fatalf("reserved partition error = %v", err)
 	}
 	if err := store.Close(); err != nil {
@@ -98,9 +98,9 @@ func openTestSystemLog(t *testing.T, dir string, topic api.TopicID, options Part
 func TestSystemLogPrefixDigestCacheMatchesFullScan(t *testing.T) {
 	dir := t.TempDir()
 	storeID := StoreID{1, 2, 3, 4}
-	partition := openTestSystemLog(t, dir, api.ClusterMetadataTopicID, PartitionOptions{SegmentBytes: 512, BatchBytes: 1024}, storeID)
+	partition := openTestSystemLog(t, dir, api.ClusterMetadataTopicID(), PartitionOptions{SegmentBytes: 512, BatchBytes: 1024}, storeID)
 	for index := range 64 {
-		if _, err := partition.AppendBatch(testBatch(api.ClusterMetadataTopicID, 0, uint64(index), fmt.Sprintf("event-%d", index))); err != nil {
+		if _, err := partition.AppendBatch(testBatch(api.ClusterMetadataTopicID(), 0, uint64(index), fmt.Sprintf("event-%d", index))); err != nil {
 			t.Fatal(err)
 		}
 		cached, err := projectionPrefixDigest(partition, storeID, partition.logEnd)
@@ -138,9 +138,9 @@ func TestSystemLogPrefixDigestCacheMatchesFullScan(t *testing.T) {
 func TestSystemLogPrefixDigestServesWithoutReadingSegments(t *testing.T) {
 	dir := t.TempDir()
 	storeID := StoreID{5, 6, 7}
-	partition := openTestSystemLog(t, dir, api.ConsumerOffsetsTopicID, PartitionOptions{SegmentBytes: 4096, BatchBytes: 1024}, storeID)
+	partition := openTestSystemLog(t, dir, api.ConsumerOffsetsTopicID(), PartitionOptions{SegmentBytes: 4096, BatchBytes: 1024}, storeID)
 	for index := range 8 {
-		if _, err := partition.AppendBatch(testBatch(api.ConsumerOffsetsTopicID, 0, uint64(index), fmt.Sprintf("commit-%d", index))); err != nil {
+		if _, err := partition.AppendBatch(testBatch(api.ConsumerOffsetsTopicID(), 0, uint64(index), fmt.Sprintf("commit-%d", index))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -148,7 +148,7 @@ func TestSystemLogPrefixDigestServesWithoutReadingSegments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := partition.AppendBatch(testBatch(api.ConsumerOffsetsTopicID, 0, partition.logEnd, "commit-8")); err != nil {
+	if _, err := partition.AppendBatch(testBatch(api.ConsumerOffsetsTopicID(), 0, partition.logEnd, "commit-8")); err != nil {
 		t.Fatal(err)
 	}
 	extended, err := projectionPrefixDigest(partition, storeID, partition.logEnd)
@@ -175,7 +175,7 @@ func TestSystemLogPrefixDigestServesWithoutReadingSegments(t *testing.T) {
 func TestPrefixDigestCacheDropsNonContiguousBatch(t *testing.T) {
 	dir := t.TempDir()
 	storeID := StoreID{8}
-	partition := openTestSystemLog(t, dir, api.ClusterMetadataTopicID, PartitionOptions{SegmentBytes: 4096, BatchBytes: 1024}, storeID)
+	partition := openTestSystemLog(t, dir, api.ClusterMetadataTopicID(), PartitionOptions{SegmentBytes: 4096, BatchBytes: 1024}, storeID)
 	partition.prefixDigest = &prefixDigestState{hash: newPrefixDigest(storeID, partition.topic, 0), storeID: storeID, covered: 5}
 	partition.extendPrefixDigestLocked(9, []byte("gap"))
 	if partition.prefixDigest != nil {
