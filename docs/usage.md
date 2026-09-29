@@ -61,6 +61,17 @@ safe to call it again; already-open partitions are reused. Use
 the topic catalog. Most applications should use `CreateTopic` and `OpenTopic`
 so the catalog can record partition identity and configuration durably.
 
+### Reserved system topic IDs
+
+Obtain the reserved system-log identities with `api.ClusterMetadataTopicID()`
+and `api.ConsumerOffsetsTopicID()`. Each call returns an independent
+`api.TopicID` value that is safe to compare or modify locally; caller changes
+cannot alter the IDs used by storage. These IDs cannot be opened through
+`OpenPartition`.
+
+Code upgrading from v0.3.0 or earlier must add parentheses to references to
+these identifiers. They were previously mutable package variables.
+
 ## Append records
 
 `Partition.Append` accepts one `api.AppendRequest`. The request's `Topic` and

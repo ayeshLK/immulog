@@ -26,12 +26,15 @@ type TopicID [16]byte
 // SegmentID is the opaque identity of one segment incarnation.
 type SegmentID [16]byte
 
-var (
-	// ClusterMetadataTopicID is reserved for the cluster metadata system log.
-	ClusterMetadataTopicID = TopicID{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
-	// ConsumerOffsetsTopicID is reserved for the consumer-offsets system log.
-	ConsumerOffsetsTopicID = TopicID{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}
-)
+// ClusterMetadataTopicID returns the reserved cluster metadata system-log ID.
+func ClusterMetadataTopicID() TopicID {
+	return TopicID{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+}
+
+// ConsumerOffsetsTopicID returns the reserved consumer-offsets system-log ID.
+func ConsumerOffsetsTopicID() TopicID {
+	return TopicID{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}
+}
 
 // IsZero reports whether the identifier is all zero bytes.
 func (id TopicID) IsZero() bool { return id == TopicID{} }

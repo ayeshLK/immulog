@@ -254,7 +254,7 @@ func (p *Partition) isSystemPartition() bool {
 	if p == nil {
 		return false
 	}
-	return p.topic == api.ClusterMetadataTopicID || p.topic == api.ConsumerOffsetsTopicID
+	return p.topic == api.ClusterMetadataTopicID() || p.topic == api.ConsumerOffsetsTopicID()
 }
 
 // reserveDisk selects the disk-pressure class for this partition. System

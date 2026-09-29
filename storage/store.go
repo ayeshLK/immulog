@@ -449,7 +449,7 @@ func (s *Store) OpenPartition(topic api.TopicID, partition uint32, options Parti
 	if topic.IsZero() {
 		return nil, errors.Join(api.ErrInvalidArgument, errors.New("topic ID must be nonzero"))
 	}
-	if topic == api.ClusterMetadataTopicID || topic == api.ConsumerOffsetsTopicID {
+	if topic == api.ClusterMetadataTopicID() || topic == api.ConsumerOffsetsTopicID() {
 		return nil, errors.Join(api.ErrInvalidArgument, errors.New("reserved system logs are not public partitions"))
 	}
 	if partition > int32Max {

@@ -65,7 +65,7 @@ func bootstrapMetadata(rootPath string, fallback StoreID, limits StoreOptions) (
 		if err != nil {
 			return nil, err
 		}
-		catalog, err := openPartition(catalogDir, api.ClusterMetadataTopicID, 0, options, storeID)
+		catalog, err := openPartition(catalogDir, api.ClusterMetadataTopicID(), 0, options, storeID)
 		if err != nil {
 			return nil, err
 		}
@@ -77,7 +77,7 @@ func bootstrapMetadata(rootPath string, fallback StoreID, limits StoreOptions) (
 			_ = catalog.Close()
 			return nil, fmt.Errorf("sync offsets parent directory: %w", err)
 		}
-		offsets, err := openPartition(offsetsDir, api.ConsumerOffsetsTopicID, 0, options, storeID)
+		offsets, err := openPartition(offsetsDir, api.ConsumerOffsetsTopicID(), 0, options, storeID)
 		if err != nil {
 			_ = catalog.Close()
 			return nil, err
@@ -118,7 +118,7 @@ func bootstrapMetadata(rootPath string, fallback StoreID, limits StoreOptions) (
 		return &metadataBootstrap{catalog: catalog, offsets: offsets, projection: projection, offsetsState: offsetsState, snapshotDiagnostics: diagnostics}, nil
 	}
 
-	if err := preflightSystemLogDirectory(catalogDir, api.ClusterMetadataTopicID, 0, systemConfig); err != nil {
+	if err := preflightSystemLogDirectory(catalogDir, api.ClusterMetadataTopicID(), 0, systemConfig); err != nil {
 		return nil, fmt.Errorf("preflight catalog log: %w", err)
 	}
 	offsetFiles, err := existingSegments(offsetsDir)
@@ -126,11 +126,11 @@ func bootstrapMetadata(rootPath string, fallback StoreID, limits StoreOptions) (
 		return nil, fmt.Errorf("inspect offsets bootstrap: %w", err)
 	}
 	if len(offsetFiles) != 0 {
-		if err := preflightSystemLogDirectory(offsetsDir, api.ConsumerOffsetsTopicID, 0, systemConfig); err != nil {
+		if err := preflightSystemLogDirectory(offsetsDir, api.ConsumerOffsetsTopicID(), 0, systemConfig); err != nil {
 			return nil, fmt.Errorf("preflight offsets log: %w", err)
 		}
 	}
-	catalog, err := openPartition(catalogDir, api.ClusterMetadataTopicID, 0, options, fallback)
+	catalog, err := openPartition(catalogDir, api.ClusterMetadataTopicID(), 0, options, fallback)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func bootstrapMetadata(rootPath string, fallback StoreID, limits StoreOptions) (
 			_ = catalog.Close()
 			return nil, fmt.Errorf("create offsets directory: %w", err)
 		}
-		offsets, err := openPartition(offsetsDir, api.ConsumerOffsetsTopicID, 0, options, fallback)
+		offsets, err := openPartition(offsetsDir, api.ConsumerOffsetsTopicID(), 0, options, fallback)
 		if err != nil {
 			_ = catalog.Close()
 			return nil, err
@@ -203,7 +203,7 @@ func bootstrapMetadata(rootPath string, fallback StoreID, limits StoreOptions) (
 		diagnostics := validateOptionalSnapshots(storeID, catalog, offsets, projection, offsetsState)
 		return &metadataBootstrap{catalog: catalog, offsets: offsets, projection: projection, offsetsState: offsetsState, snapshotDiagnostics: diagnostics}, nil
 	}
-	eventType, payload, err := decodeSystemEvent(first[0], api.ClusterMetadataTopicID)
+	eventType, payload, err := decodeSystemEvent(first[0], api.ClusterMetadataTopicID())
 	if err != nil {
 		_ = catalog.Close()
 		return nil, err
@@ -236,7 +236,7 @@ func bootstrapMetadata(rootPath string, fallback StoreID, limits StoreOptions) (
 		_ = catalog.Close()
 		return nil, corrupt(errInvalidSegment, "catalog initial anchor mismatch")
 	}
-	offsets, err := openPartition(offsetsDir, api.ConsumerOffsetsTopicID, 0, initialized.OffsetsConfig.options(), initialized.StoreID)
+	offsets, err := openPartition(offsetsDir, api.ConsumerOffsetsTopicID(), 0, initialized.OffsetsConfig.options(), initialized.StoreID)
 	if err != nil {
 		_ = catalog.Close()
 		return nil, err
@@ -303,12 +303,12 @@ func appendStoreInitialized(catalog, offsets *Partition, storeID StoreID, config
 	if err != nil {
 		return err
 	}
-	if err := systemEventAdmission(catalog, api.ClusterMetadataTopicID, 0, value, catalogLimit); err != nil {
+	if err := systemEventAdmission(catalog, api.ClusterMetadataTopicID(), 0, value, catalogLimit); err != nil {
 		return err
 	}
 	_, err = catalog.AppendBatch(api.RecordBatch{
-		Topic: api.ClusterMetadataTopicID, Partition: 0, BaseOffset: 0,
-		Records: []api.Record{{Topic: api.ClusterMetadataTopicID, Partition: 0, Offset: 0, Value: value}},
+		Topic: api.ClusterMetadataTopicID(), Partition: 0, BaseOffset: 0,
+		Records: []api.Record{{Topic: api.ClusterMetadataTopicID(), Partition: 0, Offset: 0, Value: value}},
 	})
 	return err
 }
@@ -337,7 +337,7 @@ func validateOffsetsHistory(offsets *Partition, storeID StoreID) error {
 			if record.Offset != offset {
 				return corrupt(errInvalidRecord, "offset history gap")
 			}
-			eventType, payload, err := decodeSystemEvent(record, api.ConsumerOffsetsTopicID)
+			eventType, payload, err := decodeSystemEvent(record, api.ConsumerOffsetsTopicID())
 			if err != nil {
 				return err
 			}

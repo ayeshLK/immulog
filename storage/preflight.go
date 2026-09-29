@@ -92,7 +92,7 @@ func parseTopicDirectoryName(name string) (api.TopicID, error) {
 		return id, corrupt(errInvalidSegment, "topic storage directory name is not canonical")
 	}
 	copy(id[:], decoded)
-	if id.IsZero() || id == api.ClusterMetadataTopicID || id == api.ConsumerOffsetsTopicID {
+	if id.IsZero() || id == api.ClusterMetadataTopicID() || id == api.ConsumerOffsetsTopicID() {
 		return id, corrupt(errInvalidSegment, "topic storage directory uses a reserved TopicID")
 	}
 	return id, nil

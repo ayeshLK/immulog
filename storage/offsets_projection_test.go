@@ -132,8 +132,8 @@ func appendOffsetEvent(t *testing.T, partition *Partition, eventType EventType, 
 		t.Fatal(err)
 	}
 	if _, err := partition.AppendBatch(api.RecordBatch{
-		Topic: api.ConsumerOffsetsTopicID, Partition: 0, BaseOffset: base,
-		Records: []api.Record{{Topic: api.ConsumerOffsetsTopicID, Partition: 0, Offset: base, Value: value}},
+		Topic: api.ConsumerOffsetsTopicID(), Partition: 0, BaseOffset: base,
+		Records: []api.Record{{Topic: api.ConsumerOffsetsTopicID(), Partition: 0, Offset: base, Value: value}},
 	}); err != nil {
 		t.Fatal(err)
 	}

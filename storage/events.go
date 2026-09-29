@@ -260,7 +260,7 @@ func decodeStoreInitializedPayload(data []byte) (storeInitializedEvent, error) {
 }
 
 func encodeTopicCreatedPayload(event topicCreatedEvent) ([]byte, error) {
-	if event.StoreID == (StoreID{}) || event.TopicID.IsZero() || event.TopicID == api.ClusterMetadataTopicID || event.TopicID == api.ConsumerOffsetsTopicID {
+	if event.StoreID == (StoreID{}) || event.TopicID.IsZero() || event.TopicID == api.ClusterMetadataTopicID() || event.TopicID == api.ConsumerOffsetsTopicID() {
 		return nil, errors.Join(api.ErrInvalidArgument, errors.New("invalid TopicCreated identity"))
 	}
 	if len(event.Partitions) == 0 || len(event.Partitions) > maxTopicPartitions {
@@ -320,7 +320,7 @@ func decodeTopicCreatedPayload(data []byte) (topicCreatedEvent, error) {
 		return event, err
 	}
 	copy(event.TopicID[:], topicID[:])
-	if event.TopicID.IsZero() || event.TopicID == api.ClusterMetadataTopicID || event.TopicID == api.ConsumerOffsetsTopicID {
+	if event.TopicID.IsZero() || event.TopicID == api.ClusterMetadataTopicID() || event.TopicID == api.ConsumerOffsetsTopicID() {
 		return event, corrupt(errInvalidRecord, "TopicCreated topic ID is reserved or zero")
 	}
 	if event.Name, err = cursor.stringValue(maxTopicNameLen); err != nil {
@@ -402,10 +402,10 @@ func decodeSystemEvent(record api.Record, expectedTopic api.TopicID) (EventType,
 }
 
 func eventBelongsToTopic(eventType EventType, topic api.TopicID) bool {
-	if topic == api.ClusterMetadataTopicID {
+	if topic == api.ClusterMetadataTopicID() {
 		return eventType == EventStoreInitialized || eventType == EventTopicCreated || eventType == EventPartitionLogStartAdvanced
 	}
-	if topic == api.ConsumerOffsetsTopicID {
+	if topic == api.ConsumerOffsetsTopicID() {
 		return eventType == EventGroupCreated || eventType == EventLocalAssignmentChanged || eventType == EventOffsetCommitted
 	}
 	return false

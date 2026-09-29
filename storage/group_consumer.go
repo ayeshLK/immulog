@@ -575,7 +575,7 @@ func canonicalGroupMembers(specs []api.ConsumerGroupMember) (canonicalGroupMembe
 	for index, spec := range specs {
 		member := canonicalGroupMember{subscriptions: make([]topicKey, len(spec.Subscriptions))}
 		for subIndex, subscription := range spec.Subscriptions {
-			if subscription.Topic.IsZero() || subscription.Topic == api.ClusterMetadataTopicID || subscription.Topic == api.ConsumerOffsetsTopicID || subscription.Partition > int32Max {
+			if subscription.Topic.IsZero() || subscription.Topic == api.ClusterMetadataTopicID() || subscription.Topic == api.ConsumerOffsetsTopicID() || subscription.Partition > int32Max {
 				return nil, nil, errors.Join(api.ErrInvalidArgument, errors.New("consumer group subscription is invalid"))
 			}
 			member.subscriptions[subIndex] = topicKey{topic: subscription.Topic, partition: subscription.Partition}
@@ -653,7 +653,7 @@ func equalCanonicalGroupMembers(left, right canonicalGroupMembership) bool {
 func explicitStartMap(starts []api.ExplicitStart) (map[topicKey]uint64, error) {
 	result := make(map[topicKey]uint64, len(starts))
 	for _, start := range starts {
-		if start.Topic.IsZero() || start.Topic == api.ClusterMetadataTopicID || start.Topic == api.ConsumerOffsetsTopicID || start.Partition > int32Max {
+		if start.Topic.IsZero() || start.Topic == api.ClusterMetadataTopicID() || start.Topic == api.ConsumerOffsetsTopicID() || start.Partition > int32Max {
 			return nil, errors.Join(api.ErrInvalidArgument, errors.New("explicit consumer start is invalid"))
 		}
 		key := topicKey{topic: start.Topic, partition: start.Partition}

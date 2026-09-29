@@ -116,7 +116,7 @@ func (s *Store) OpenConsumer(ctx context.Context, groupID string, topic api.Topi
 	if _, err := appendString(nil, groupID, maxGroupIDBytes); err != nil {
 		return nil, err
 	}
-	if topic.IsZero() || topic == api.ClusterMetadataTopicID || topic == api.ConsumerOffsetsTopicID || partition > int32Max {
+	if topic.IsZero() || topic == api.ClusterMetadataTopicID() || topic == api.ConsumerOffsetsTopicID() || partition > int32Max {
 		return nil, errors.Join(api.ErrInvalidArgument, errors.New("consumer topic partition is invalid"))
 	}
 	if options.Start == 0 {
@@ -558,14 +558,14 @@ func (s *Store) appendOffsetsEventLocked(eventType EventType, body []byte) error
 		return err
 	}
 	s.offsets.mu.RLock()
-	err = systemEventAdmission(s.offsets, api.ConsumerOffsetsTopicID, base, value, s.options.MaxOffsetsHistoryBytes)
+	err = systemEventAdmission(s.offsets, api.ConsumerOffsetsTopicID(), base, value, s.options.MaxOffsetsHistoryBytes)
 	s.offsets.mu.RUnlock()
 	if err != nil {
 		return err
 	}
 	batch := api.RecordBatch{
-		Topic: api.ConsumerOffsetsTopicID, Partition: 0, BaseOffset: base,
-		Records: []api.Record{{Topic: api.ConsumerOffsetsTopicID, Partition: 0, Offset: base, Value: value}},
+		Topic: api.ConsumerOffsetsTopicID(), Partition: 0, BaseOffset: base,
+		Records: []api.Record{{Topic: api.ConsumerOffsetsTopicID(), Partition: 0, Offset: base, Value: value}},
 	}
 	appendOffsets := s.offsets.AppendBatch
 	if s.offsetsAppend != nil {
@@ -575,7 +575,7 @@ func (s *Store) appendOffsetsEventLocked(eventType EventType, body []byte) error
 	if err != nil {
 		return err
 	}
-	if err := s.offsetsState.apply(api.Record{Topic: api.ConsumerOffsetsTopicID, Partition: 0, Offset: base, Value: value}, s.catalogState); err != nil {
+	if err := s.offsetsState.apply(api.Record{Topic: api.ConsumerOffsetsTopicID(), Partition: 0, Offset: base, Value: value}, s.catalogState); err != nil {
 		s.offsetsUnavailable = true
 		return errors.Join(api.ErrGroupUnavailable, err)
 	}

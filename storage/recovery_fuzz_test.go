@@ -25,7 +25,7 @@ import (
 
 func FuzzPreflightSystemLogSegment(f *testing.F) {
 	header, err := EncodeSegmentHeader(SegmentHeader{
-		Topic: api.ClusterMetadataTopicID, Partition: 0, ID: api.SegmentID{1},
+		Topic: api.ClusterMetadataTopicID(), Partition: 0, ID: api.SegmentID{1},
 	})
 	if err != nil {
 		f.Fatal(err)
@@ -41,7 +41,7 @@ func FuzzPreflightSystemLogSegment(f *testing.F) {
 			t.Fatal(err)
 		}
 		before := append([]byte(nil), data...)
-		_, _, _ = preflightSegmentChain(dir, api.ClusterMetadataTopicID, 0, systemPartitionConfig().SegmentMaxBytes, 0, true, nil)
+		_, _, _ = preflightSegmentChain(dir, api.ClusterMetadataTopicID(), 0, systemPartitionConfig().SegmentMaxBytes, 0, true, nil)
 		after, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
