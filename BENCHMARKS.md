@@ -15,6 +15,7 @@ portable throughput guarantees or release thresholds unless explicitly stated.
 - [Recorded results](#recorded-results)
   - [Microbenchmark qualification — 2026-09-29](#microbenchmark-qualification--2026-09-29)
   - [Microbenchmark qualification — 2026-09-26](#microbenchmark-qualification--2026-09-26)
+  - [Sustained soak — 2026-09-29–30](#sustained-soak--2026-09-2930)
   - [Sustained soak — 2026-09-27–28](#sustained-soak--2026-09-2728)
   - [Sustained soak — 2026-09-25](#sustained-soak--2026-09-25)
   - [Microbenchmarks — 2026-09-20](#microbenchmarks--2026-09-20)
@@ -262,6 +263,66 @@ limits; it is not a routine local smoke.
 The current evidence sets below are retained here. Older result records were
 removed because the benchmark and soak frameworks evolved; they should not be
 compared directly with these measurements.
+
+### Sustained soak — 2026-09-29–30
+
+This evidence set contains three isolated sustained-profile runs. Runs 1 and 2
+used commit `53312b9e4b30c914efbd1ab3c9132bbbcf29755d` on `main`; run 3 used
+commit `3f7d0a2e4038f303de4c8e2c2b7ca8c2688e67dd` on
+`chore/dependabot-go-1.25`. Because the runs do not all use the same commit,
+the results are reported together for operational context but MUST NOT be
+treated as one same-commit qualification set or pooled for regression claims.
+
+| Environment | Value |
+|---|---|
+| Run interval | 2026-09-29 23:44:39–2026-09-30 12:14:51 (+05:30) |
+| Commit / branch | Runs 1–2: `53312b9e4b30c914efbd1ab3c9132bbbcf29755d` / `main`; run 3: `3f7d0a2e4038f303de4c8e2c2b7ca8c2688e67dd` / `chore/dependabot-go-1.25` |
+| Processor | Intel(R) Core(TM) i7-10510U CPU @ 1.80GHz |
+| CPU count | 8 logical CPUs |
+| Memory | not captured |
+| OS / kernel | Linux `7.0.0-34-generic` |
+| Architecture | `amd64`, `GOAMD64=v1` |
+| Go | `1.26.2` |
+| Filesystem | ext4 |
+| Worktree status | not captured |
+
+Configuration: three isolated sustained-profile runs, four-hour duration,
+30-minute configured warmup, 10-minute reopen interval, seed `0x5eed5eed`,
+1,000 records/s aggregate producer-rate target, 250ms sample interval, and
+`--churn-interval 0`. Resource preflights required 24 GiB free space and
+65,536 open files. All three runs completed successfully and the analyzer
+marked all three metrics reports valid.
+
+| Run | Active measurement | Offered records/s | Acknowledged records/s | Backlog start → end (slope/s) | Delivery/commit lag avg/max | Max open files | Max HeapAlloc | Max RSS | Skipped stats / delivery / commit |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 3h49m50s | 946.57 | 946.57 | 1 → 0 (-0.00) | 5/1226; 5/1226 | 530 | 1,203,688,264 B | 1,463,242,752 B | 1,482,127 / 777,873 / 26,564 |
+| 2 | 3h47m37s | 947.61 | 947.60 | 0 → 0 (0.00) | 5/1303; 5/1303 | 531 | 1,193,059,800 B | 1,532,936,192 B | 1,460,804 / 763,593 / 26,490 |
+| 3 | 3h45m35s | 944.52 | 944.51 | 7 → 0 (-0.00) | 6/1409; 6/1409 | 531 | 1,171,250,616 B | 1,558,286,336 B | 1,391,365 / 681,200 / 27,784 |
+
+Lag values are records: average/max delivery followed by average/max commit.
+Each run had zero assignment losses, zero dropped samples, and zero overload
+calls. Stable-topic oracles verified through their next offset with no
+retention skips; retained-topic oracles passed with the expected retention
+accounting. Unknown append outcomes were 95, 102, and 90; known rejections
+were 4, 2, and 4, respectively. The high skipped observer/oracle counts are
+reported because the observer state was frequently busy; they are not dropped
+samples or failed correctness checks.
+
+The acknowledged rates vary by approximately 0.3%, with zero sampled stable
+consumer backlog growth and a flat open-file high-water mark. The producer
+schedule realized about 945–948 offers/s, below its 1,000 records/s target, so
+this is local stability evidence near 946 acknowledged records/s—not a
+qualification at a realized 1,000 records/s or a capacity ceiling.
+Measurement-only rates exclude reopen-cycle drain, verification, and cleanup
+time.
+
+**Warmup and comparability caveat:** although the configuration requests 30
+minutes, the warmup path returns at the 10-minute reopen interval, so each run
+had approximately 10 minutes of actual warmup. The runner did not capture a
+worktree diff. Use the recorded commit-specific rows for comparisons and do
+not treat this mixed-commit set as release qualification evidence. These are
+local stability results for this offered load, not a portable throughput
+guarantee or a maximum-capacity result.
 
 <!-- microbenchmark-evidence:commit=35b3fd6d8f0d85932e8eec049a8a52778376bdef,date=2026-09-29 -->
 
