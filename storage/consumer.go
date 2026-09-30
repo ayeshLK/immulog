@@ -380,20 +380,20 @@ func (consumer *Consumer) Close() error {
 	defer consumer.store.releaseOffsetsAdmission()
 	consumer.store.mu.Lock()
 	defer consumer.store.mu.Unlock()
-	if consumer.store.closed || consumer.store.consumers[consumerMapKey(consumer.groupID, consumer.key)] != consumer {
+	key := consumerMapKey(consumer.groupID, consumer.key)
+	if consumer.store.closed || consumer.store.consumers[key] != consumer {
 		consumer.closed = true
-		delete(consumer.store.consumers, consumerMapKey(consumer.groupID, consumer.key))
 		return nil
 	}
 	if consumer.store.offsetsUnavailable {
 		consumer.closed = true
-		delete(consumer.store.consumers, consumerMapKey(consumer.groupID, consumer.key))
+		delete(consumer.store.consumers, key)
 		return api.ErrGroupUnavailable
 	}
 	group := consumer.store.offsetsState.groups[consumer.groupID]
 	if group == nil || group.Generation != consumer.generation || group.AssignmentOwner[consumer.key] != consumer.session || group.Generation == ^uint64(0) {
 		consumer.closed = true
-		delete(consumer.store.consumers, consumerMapKey(consumer.groupID, consumer.key))
+		delete(consumer.store.consumers, key)
 		return nil
 	}
 	body, err := encodeEmptyAssignmentBody(consumer.store.storeID, consumer.store.catalogState.revision, consumer.groupID, group.Generation)
@@ -401,7 +401,7 @@ func (consumer *Consumer) Close() error {
 		err = consumer.store.appendOffsetsEventLocked(EventLocalAssignmentChanged, body)
 	}
 	consumer.closed = true
-	delete(consumer.store.consumers, consumerMapKey(consumer.groupID, consumer.key))
+	delete(consumer.store.consumers, key)
 	if err != nil {
 		return consumer.store.groupAppendError(err)
 	}
