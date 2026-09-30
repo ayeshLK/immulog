@@ -68,6 +68,9 @@ jobs:
         run: test -z "$(gofmt -l api storage perf)"
       - name: Verify local notes are excluded
         run: test -z "$(git ls-files -- PROGRESS.md DEPENDENCY_AUDIT.md)"
+      - name: Check performance workflow input handling
+        shell: bash
+        run: bash scripts/check-performance-workflow.sh
       - name: Verify module files
         run: |
           go mod tidy
