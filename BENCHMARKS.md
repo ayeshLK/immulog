@@ -85,6 +85,10 @@ Important metric semantics:
   device-wide utilization.
 - Soak observer/oracle checks can be skipped when their state is busy; report
   skipped counts and dropped samples with the results.
+- `warmup_nanos` is the configured warmup duration. `warmup_elapsed_nanos` is
+  the measured elapsed warmup, including reopen cycles and their verification;
+  the analyzer marks a run invalid when the measured duration is shorter than
+  the configured duration.
 
 ## Run the benchmarks
 

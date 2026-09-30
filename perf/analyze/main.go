@@ -61,6 +61,7 @@ type rawReport struct {
 	Completed             *bool                      `json:"completed"`
 	Failure               string                     `json:"failure"`
 	WarmupNanos           uint64                     `json:"warmup_nanos"`
+	WarmupElapsedNanos    *uint64                    `json:"warmup_elapsed_nanos"`
 	MeasurementNanos      uint64                     `json:"measurement_nanos"`
 	TotalNanos            uint64                     `json:"total_nanos"`
 	Phases                []rawPhase                 `json:"phases"`
@@ -93,6 +94,7 @@ type analysis struct {
 	Failure               string                    `json:"failure,omitempty"`
 	Version               uint32                    `json:"version"`
 	WarmupNanos           uint64                    `json:"warmup_nanos"`
+	WarmupElapsedNanos    uint64                    `json:"warmup_elapsed_nanos"`
 	MeasurementNanos      uint64                    `json:"measurement_nanos"`
 	TotalNanos            uint64                    `json:"total_nanos"`
 	DrainNanos            uint64                    `json:"drain_nanos"`
@@ -146,8 +148,12 @@ func analyze(path string, report rawReport) analysis {
 	if report.Completed != nil {
 		completed = *report.Completed
 	}
+	var warmupElapsedNanos uint64
+	if report.WarmupElapsedNanos != nil {
+		warmupElapsedNanos = *report.WarmupElapsedNanos
+	}
 	result := analysis{
-		Input: path, Completed: completed, Failure: report.Failure, Version: report.Version, WarmupNanos: report.WarmupNanos, MeasurementNanos: report.MeasurementNanos,
+		Input: path, Completed: completed, Failure: report.Failure, Version: report.Version, WarmupNanos: report.WarmupNanos, WarmupElapsedNanos: warmupElapsedNanos, MeasurementNanos: report.MeasurementNanos,
 		TotalNanos: report.TotalNanos, OfferedRecordsPerS: float64(report.Offered) / seconds,
 		AcknowledgedPerS:   float64(report.Acknowledged) / seconds,
 		AcknowledgedBytesS: float64(report.AckBytes) / seconds,
@@ -191,6 +197,13 @@ func analyze(path string, report rawReport) analysis {
 		result.Valid = false
 		result.Reasons = append(result.Reasons, reason)
 	}
+	if report.WarmupNanos > 0 && report.WarmupElapsedNanos == nil {
+		result.Valid = false
+		result.Reasons = append(result.Reasons, "warmup elapsed duration is missing")
+	} else if result.WarmupElapsedNanos < result.WarmupNanos {
+		result.Valid = false
+		result.Reasons = append(result.Reasons, "warmup elapsed before configured duration")
+	}
 	if report.SamplesDropped != 0 {
 		result.Valid = false
 		result.Reasons = append(result.Reasons, "samples were dropped")
@@ -222,10 +235,10 @@ func bucket(value uint64) *uint64 {
 
 func renderMarkdown(results []analysis) string {
 	var builder strings.Builder
-	builder.WriteString("| Run | Valid | Measurement | Offered records/s | Acknowledged records/s | Backlog start | Backlog end | Backlog slope/s | Stats skipped | Oracle delivery skipped | Oracle commit skipped |\n")
-	builder.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+	builder.WriteString("| Run | Valid | Warmup configured | Warmup elapsed | Measurement | Offered records/s | Acknowledged records/s | Backlog start | Backlog end | Backlog slope/s | Stats skipped | Oracle delivery skipped | Oracle commit skipped |\n")
+	builder.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	for _, result := range results {
-		builder.WriteString(fmt.Sprintf("| `%s` | %t | %.1fs | %.2f | %.2f | %d | %d | %.2f | %d | %d | %d |\n", result.Input, result.Valid, float64(result.MeasurementNanos)/1e9, result.OfferedRecordsPerS, result.AcknowledgedPerS, result.BacklogStart, result.BacklogEnd, result.BacklogSlopePerS, result.ConsumerStatsSkipped, result.OracleDeliverySkipped, result.OracleCommitSkipped))
+		builder.WriteString(fmt.Sprintf("| `%s` | %t | %.1fs | %.1fs | %.1fs | %.2f | %.2f | %d | %d | %.2f | %d | %d | %d |\n", result.Input, result.Valid, float64(result.WarmupNanos)/1e9, float64(result.WarmupElapsedNanos)/1e9, float64(result.MeasurementNanos)/1e9, result.OfferedRecordsPerS, result.AcknowledgedPerS, result.BacklogStart, result.BacklogEnd, result.BacklogSlopePerS, result.ConsumerStatsSkipped, result.OracleDeliverySkipped, result.OracleCommitSkipped))
 		for _, reason := range result.Reasons {
 			builder.WriteString(fmt.Sprintf("\n- `%s`: %s\n", result.Input, reason))
 		}
