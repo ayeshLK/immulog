@@ -11,6 +11,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # v0.48.0+ requires Go 1.26; lift this only with a manual Go support change.
+      - dependency-name: golang.org/x/sys
+        versions:
+          - ">= 0.48.0"
     labels:
       - dependencies
       - go
