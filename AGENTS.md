@@ -7,11 +7,12 @@ Public contracts and stable domain errors are in `api/`; encoding, segment
 management, locking, partitions, and the store live in `storage/`. Core
 correctness tests are co-located with their package (`*_test.go`); benchmark
 and long-running soak harnesses live under `perf/`. `README.md` describes the
-current scope, `BENCHMARKS.md` is the source of truth for performance
-methodology and dated evidence, and `PROGRESS.md` records the implementation
-checkpoint and next steps. Keep future metadata, consumer, retention, and
-ingress work within the planned package boundaries; do not add network or
-replication code to this slice.
+current scope, `docs/spec/spec.md` is the normative behavioral and persistence
+contract, `BENCHMARKS.md` is the source of truth for performance methodology
+and dated evidence, and `PROGRESS.md` records the local implementation
+checkpoint. Keep future metadata, consumer, retention, and ingress work within
+the planned package boundaries; do not add network or replication code to this
+slice.
 
 The `Store` owns the canonical directory, stable `LOCK`, catalog and consumer
 offset system partitions, user partitions, retention, snapshots, and disk
@@ -47,44 +48,29 @@ All integers are little-endian. Only `filesystem.go`'s `fileSystemOps` seam
 touches the OS, which is how fault-injection tests simulate write/sync
 failures.
 
-**Append path** (`Partition.Append`, `writer.go:386`): validate and charge the
-request → reserve disk through `Partition.reserveDisk` → `admit` against the
-in-flight bound → copy caller bytes (`copyRequest`) → `enqueue` publishes into
-the per-partition disruptor ring (`ingress.go`). A single `BatchProcessor`
-goroutine is the only writer: `ingressHandler.Handle` accumulates an
-end-of-batch group, `writeIngressBatches` splits it by `BatchRecords`/
-`BatchBytes`, and `writeRequests` assigns offsets from `p.logEnd` and calls
-`appendEncodedLocked` (`append_encoded.go`), which rolls segments, writes,
-syncs, and only then completes the waiting callers. A sync failure marks the
-partition unavailable and returns `ErrAppendOutcomeUnknown` — nothing is rolled
-back. `ingress.go` is the *only* adapter over `lib-disruptor`; keep it that way.
+**Append path:** validate and reserve capacity before publication; copy caller
+data; serialize offsets through one terminal writer; write and synchronize
+authoritative bytes before acknowledging. Sync failures produce
+`ErrAppendOutcomeUnknown` and fence the partition. `ingress.go` is the only
+adapter over `lib-disruptor`.
 
-**Read path** (`fetch.go`): bounds-check against segment zero's base offset and
-`logEnd`, try the optional in-memory live tail (`tail.go`, byte-bounded per
-store via `tailBudget`), else scan segments from the nearest sampled
-`offsetIndex` hint. `Reader` is a thin cursor over `Fetch`.
+**Read path:** enforce the retained `[L,H]` range, use the optional bounded live
+tail when available, and otherwise scan authoritative segments using rebuildable
+index hints. `Reader` is a cursor over `Fetch`.
 
-**Metadata as logs**: the catalog and consumer offsets are themselves
-append-only partitions of records carrying `EventTopicCreated`,
-`EventPartitionLogStartAdvanced`, `EventGroupCreated`,
-`EventLocalAssignmentChanged`, `EventOffsetCommitted`, and
-`EventStoreInitialized` (`events.go`, `events_validation.go`). `Open` runs
-`bootstrapMetadata` (`bootstrap.go`), replays both logs into
-`catalogProjection` (`catalog.go`) and `offsetsProjection`
-(`offsets_projection.go`), preflights user storage against the projection
-(`preflight.go`), then reconciles retired artifacts. `snapshot.go` snapshots
-are validated accelerators, never authority — a mismatch degrades to replay and
-is reported through `Store.SnapshotDiagnostics`.
+**Metadata as logs:** catalog and consumer offsets are authoritative append-only
+system partitions replayed into projections during `Open`. Snapshots are
+validated accelerators only; mismatches degrade to replay and are reported by
+`Store.SnapshotDiagnostics`.
 
-**Consumers**: `consumer.go` is one assignment (group, topic, partition);
-`group_consumer.go` is a same-process multi-partition group with canonical
-membership, generations, and fencing. Both serialize durable commits through
-`Store.appendOffsetsEventLocked` on the offsets log.
+**Consumers:** `consumer.go` implements one assignment; `group_consumer.go`
+implements same-process multi-partition membership. Both use durable
+generation/session fencing and synchronous offset commits. A stale consumer
+close must never unregister its replacement.
 
-**Cross-cutting**: `retention.go` (background loop, advances log start before
-deleting), `disk_pressure.go` (class-aware byte/inode ledger, see the Safety
-section), `stats.go`/`consumer_stats.go` (bounded diagnostics and latency
-buckets), `config.go` and `capacity.go` (limit defaults and planning).
+**Cross-cutting:** retention advances the durable log-start boundary before
+deletion; disk pressure uses class-aware byte/inode admission; diagnostics,
+limits, snapshots, indexes, and tails are bounded and rebuildable where noted.
 
 ## Build, Test, and Development Commands
 
@@ -161,9 +147,10 @@ artifacts. `metrics.json` includes outcome counters, oracle results, lag,
 RSS/heap/goroutine/FD observations, process I/O and CPU ticks, latency
 histograms, aggregate/per-partition delivered payload bytes and rates, and
 bounded periodic backlog/resource samples, skipped observer/oracle checks,
-and completion/failure status. Schema version 2 records optional warmup duration, separates measurement
-duration from total cleanup time, and records measure, drain,
-verify, and cleanup phases. Ingress `acknowledged_bytes` and consumer
+and completion/failure status. Schema version 2 records configured and actual
+warmup durations, separates measurement duration from total cleanup time, and
+records measure, drain, verify, and cleanup phases. Ingress `acknowledged_bytes`
+and consumer
 `delivered_payload_bytes` count record `Value` bytes only; keys and on-disk
 framing are excluded. Long-run p50/p90/p95/p99/p999 values are bucket upper
 bounds; a `0` in legacy latency fields denotes the open-ended final bucket,
@@ -182,36 +169,15 @@ or qualification runs should start from a clean, recorded commit. Long runs
 can consume multiple GiB and thousands of open files; keep automatic resource
 preflights enabled unless deliberately testing a lower limit.
 
-Keep `BENCHMARKS.md` reader-oriented: include a table of contents, purpose and
-measurement guidance, runnable commands for each benchmark family, and results
-grouped by test type with newest results first. Use concise environment/result
-tables; include processor, CPU count, OS/kernel, architecture, memory, Go
-version, date, and commit when available. Mark missing values as “not captured”
-rather than inferring them. Do not include local evidence-directory
-paths or filesystem/device details in checked-in result entries; preserve
-those in the run artifacts when useful. Retain only results comparable to the
-current benchmark framework. At this checkpoint, keep the 2026-09-20
-microbenchmark results and the 2026-09-25 and 2026-09-27–28 sustained-soak
-results; remove obsolete results
-when the framework has materially evolved. The 2026-09-27–28 evidence contains
-three valid sustained runs at commit `aa62d74`, each with zero sampled backlog
-slope and no assignment loss; it is local stability evidence near 942
-acknowledged records/s, not a capacity claim. Do not commit raw run artifacts.
-
-The current soak warmup path invokes one `runSoakCycle`, which can return at
-the reopen interval before a longer configured warmup elapses. Do not treat
-`warmup_nanos` alone as proof of elapsed warmup; confirm timestamps or use a
-configuration/code path that completes the intended warmup before recording
-qualification evidence. The 2026-09-27–28 runs requested 30 minutes but
-actually warmed up for about one 10-minute reopen cycle; use their reported
-measurement-only durations for rate comparisons.
-
-A sustained no-churn run that reports consumer assignment loss without a
-replacement is a failed liveness run, not throughput evidence. The soak's
-consumer progress timeout is currently five seconds; diagnose the reported
-assignment-loss invariant and last poll/commit timing before increasing that
-timeout, because synchronous durable commits, snapshots, or filesystem
-contention may prevent deadline renewal.
+Keep `BENCHMARKS.md` reader-oriented: include methodology, runnable commands,
+newest comparable results first, concise environment tables, and explicit
+“not captured” values. Do not commit raw run artifacts or local evidence paths.
+Compare runs using the same commit, seed, profile, workload, Go version, and
+filesystem. `warmup_nanos` is the configured warmup; `warmup_elapsed_nanos` is
+the measured elapsed warmup including reopen/verification. The analyzer marks
+reports invalid when elapsed warmup is missing or shorter than configured.
+Sustained evidence with positive backlog growth or assignment loss is not a
+stable capacity result.
 
 ## Coding Style & Naming Conventions
 
@@ -254,32 +220,17 @@ incomplete final tail may be truncated. Retention advances the durable log-start
 boundary before deleting inventoried user artifacts and never reuses offsets;
 system logs are not user-retained.
 
-Snapshots are bound to their log by a projection-prefix digest. The reserved
-system logs keep that digest as a running hash (`prefixDigestState` in
-`storage/snapshot.go`) that each durable append extends, so publication never
-re-reads the log; a non-contiguous extension drops the cache and the next
-request rebuilds it from the segments. The cache is safe only because every
-system-log append and every snapshot build runs under the store mutex — keep
-new metadata write paths under that mutex. `SaveSnapshots` holds the store
-mutex just long enough to build the bytes and publishes outside it under
-`snapshotMu`, because consumer lease renewal also needs the store mutex; do
-not widen that critical section back over the file write and sync.
+Snapshots are bound to their log by a projection-prefix digest and are safe
+only as rebuildable accelerators. Keep system-log appends and snapshot builds
+under the store mutex. `SaveSnapshots` should build under the store mutex and
+publish outside it under `snapshotMu`; do not hold the store mutex over file
+write and sync.
 
-A partition keeps a live descriptor only for its active segment; every sealed
-segment's handle is closed (at roll time and after recovery) and reopened on
-demand through the store's bounded `segmentFileCache`
-(`storage/segment_files.go`, `Store.segmentFiles`,
-`StoreOptions.MaxOpenSegmentFiles`). Any new code that reads segment bytes
-must go through `Partition.acquireSegmentFile`/`readSegmentFile` rather than
-assuming `segment.file` is non-nil — it is nil for every segment except the
-last one. Before this cache existed, recovery reopened every historical
-segment and never released the sealed ones, so a long-lived log's descriptor
-count matched its total segment count and only grew across reopens; that
-growth is what the cap eliminates. `installSegmentIndexes` (index/timeindex
-sidecars) is expensive for a large log, so a sealed segment's `indexDirty`
-flag lets `Partition.Close` skip republishing sidecars that were already
-checkpointed when their segment rolled — only the still-open active segment
-and any index that failed to read back at recovery stay dirty.
+A partition keeps a live descriptor only for its active segment. Sealed
+segments are reopened through the bounded `segmentFileCache`; new code reading
+segment bytes must use `Partition.acquireSegmentFile` or `readSegmentFile`
+rather than assuming `segment.file` is non-nil. Preserve the sidecar
+checkpointing/`indexDirty` behavior when changing segment lifecycle code.
 
 Storage tests should use `t.TempDir()` and never write to a real user data
 directory. `Store.Open` owns the data directory through its stable `LOCK`
@@ -287,15 +238,11 @@ file; do not remove, replace, or truncate that file. Treat complete corrupt
 batches as errors and preserve the conservative recovery rules documented in
 `PROGRESS.md`.
 
-Partition disk admission is class-aware: user partitions charge the user
-ledger via `reserveDiskUser`, while the reserved system partitions
-(`ClusterMetadataTopicID`, `ConsumerOffsetsTopicID`) charge the protected
-control ledger via `reserveDiskControl` so fencing, commits, and retention
-boundary events survive user-stop pressure. Route new append paths through
-`Partition.reserveDisk` rather than either helper directly, and preserve the
-`catalog.store`/`offsets.store` back-references set by `OpenWithOptions`.
-Tests exercising pressure can swap `Store.disk.probe` under the ledger lock;
-see `disk_pressure_test.go` for the pattern.
+Disk admission is class-aware: user partitions use the user ledger while the
+reserved system partitions use protected control capacity. Route new append
+paths through `Partition.reserveDisk`; preserve the catalog/offsets store
+back-references established by `OpenWithOptions`. Pressure tests may replace
+`Store.disk.probe` under the ledger lock.
 
 ## CI/CD and Repository Automation
 
@@ -311,7 +258,10 @@ disk-pressure implementations.
 All third-party GitHub Actions must be pinned to full commit SHAs and workflows
 must retain least-privilege permissions. Release preparation and publication are
 manual and pre-v1, with publication protected by the `release` environment. Do
-not create, move, reuse, or delete release tags manually.
+not create, move, reuse, or delete release tags manually. Dispatch-controlled
+performance inputs must pass through environment variables, be validated before
+runner invocation, and never be interpolated directly into shell source;
+`scripts/check-performance-workflow.sh` protects this rule.
 
 ## Release Sequencing
 
