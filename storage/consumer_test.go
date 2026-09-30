@@ -102,6 +102,49 @@ func TestConsumerCommitsResumeAndFencesReassignment(t *testing.T) {
 	}
 }
 
+func TestStaleConsumerCloseDoesNotUnregisterReplacement(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	descriptor, err := store.CreateTopic("stale-close", 1, PartitionOptions{BatchBytes: 4096, SegmentBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partition, err := store.OpenPartition(descriptor.ID, 0, PartitionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := partition.Append(context.Background(), api.AppendRequest{Topic: descriptor.ID, Partition: 0, Value: []byte("value")}); err != nil {
+		t.Fatal(err)
+	}
+
+	options := api.ConsumerOptions{Start: api.GroupStartEarliest, Fetch: api.FetchOptions{MaxRecords: 1, MaxBytes: 1024}}
+	first, err := store.OpenConsumer(context.Background(), "stale-close", descriptor.ID, 0, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := store.OpenConsumer(context.Background(), "stale-close", descriptor.ID, 0, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := replacement.Poll(context.Background(), api.FetchOptions{})
+	if err != nil {
+		t.Fatalf("replacement poll after stale close = %v", err)
+	}
+	if len(result.Records) != 1 || result.Records[0].Offset != 0 || result.NextOffset != 1 {
+		t.Fatalf("replacement poll = %#v, want one record at offset 0", result)
+	}
+	if err := replacement.Commit(context.Background(), result.NextOffset); err != nil {
+		t.Fatalf("replacement commit after stale close = %v", err)
+	}
+}
+
 func TestConsumerLatestStartPersistsBaselineBeforeFirstCommit(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {
