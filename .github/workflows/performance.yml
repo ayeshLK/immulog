@@ -56,6 +56,11 @@ jobs:
     env:
       BENCHTIME: ${{ inputs.benchtime }}
       BENCHMARK_COUNT: ${{ inputs.benchmark_count }}
+      RUN_SOAK_SMOKE: ${{ inputs.run_soak_smoke }}
+      SOAK_PROFILE: ${{ inputs.soak_profile }}
+      SOAK_DURATION: ${{ inputs.soak_duration }}
+      SOAK_PRODUCER_RATE: ${{ inputs.soak_producer_rate }}
+      SOAK_ANALYZE: ${{ inputs.soak_analyze }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -77,6 +82,9 @@ jobs:
           findmnt -T . >> perf-results/environment.txt
           df -T . >> perf-results/environment.txt
           git rev-parse HEAD >> perf-results/environment.txt
+      - name: Validate dispatch inputs
+        shell: bash
+        run: bash scripts/validate-performance-inputs.sh
       - name: Run microbenchmarks
         shell: bash
         run: |
@@ -86,18 +94,22 @@ jobs:
             --benchtime "$BENCHTIME" \
             --count "$BENCHMARK_COUNT"
       - name: Run optional soak smoke
-        if: ${{ inputs.run_soak_smoke }}
+        if: ${{ env.RUN_SOAK_SMOKE == 'true' }}
         shell: bash
         run: |
-          perf/soak/run.sh \
-            --run-dir "$GITHUB_WORKSPACE/perf-results/soak" \
-            --profile "${{ inputs.soak_profile }}" \
-            --duration "${{ inputs.soak_duration }}" \
-            --producer-rate "${{ inputs.soak_producer_rate }}" \
-            --timeout 90s \
-            --minimum-free-bytes 0 \
-            --minimum-open-files 0 \
-            ${{ inputs.soak_analyze && '--analyze' || '' }}
+          soak_args=(
+            --run-dir "$GITHUB_WORKSPACE/perf-results/soak"
+            --profile "$SOAK_PROFILE"
+            --duration "$SOAK_DURATION"
+            --producer-rate "$SOAK_PRODUCER_RATE"
+            --timeout 90s
+            --minimum-free-bytes 0
+            --minimum-open-files 0
+          )
+          if [[ "$SOAK_ANALYZE" == true ]]; then
+            soak_args+=(--analyze)
+          fi
+          perf/soak/run.sh "${soak_args[@]}"
       - name: Upload raw evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
