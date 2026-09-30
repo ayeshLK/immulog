@@ -13,6 +13,7 @@ portable throughput guarantees or release thresholds unless explicitly stated.
   - [Soak workloads](#soak-workloads)
   - [Environment and artifacts](#environment-and-artifacts)
 - [Recorded results](#recorded-results)
+  - [Microbenchmark qualification — 2026-09-29](#microbenchmark-qualification--2026-09-29)
   - [Microbenchmark qualification — 2026-09-26](#microbenchmark-qualification--2026-09-26)
   - [Sustained soak — 2026-09-27–28](#sustained-soak--2026-09-2728)
   - [Sustained soak — 2026-09-25](#sustained-soak--2026-09-25)
@@ -261,6 +262,99 @@ limits; it is not a routine local smoke.
 The current evidence sets below are retained here. Older result records were
 removed because the benchmark and soak frameworks evolved; they should not be
 compared directly with these measurements.
+
+<!-- microbenchmark-evidence:commit=35b3fd6d8f0d85932e8eec049a8a52778376bdef,date=2026-09-29 -->
+
+### Microbenchmark qualification — 2026-09-29
+
+Configuration: `qualification` profile, `all` suite, 10 seconds per sample,
+10 samples per process run, 3 independent runs, and `-cpu 1` (30 samples per
+benchmark). All three runs passed.
+
+| Environment | Value |
+|---|---|
+| Run start | 2026-09-29 05:50:04 (+05:30) |
+| Commit / branch | `35b3fd6d8f0d85932e8eec049a8a52778376bdef` / `main` |
+| Worktree status | Clean; runner used `allow_dirty=0` |
+| Processor | Intel(R) Core(TM) i7-10510U CPU @ 1.80GHz |
+| CPU count | 8 logical CPUs; benchmarks ran with `-cpu 1` |
+| Memory | Not captured |
+| OS / kernel | Linux `7.0.0-34-generic` |
+| Architecture | `amd64`, `GOAMD64=v1` |
+| Go | `1.26.2` |
+| Filesystem | ext4 |
+
+Values are medians across all captured samples; P10–P90 shows ns/op
+variability.
+
+| Benchmark | Samples | Median ns/op | P10–P90 ns/op | CV | Median records/s | Median MB/s | Median B/op | Median allocs/op |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `BenchmarkDirectAppendBatch/records-1/payload-1024` | 30 | 1523226 | 1515149–1532084 | 7.1% | 656 | 0.67 | 242062 | 8 |
+| `BenchmarkDirectAppendBatch/records-1/payload-256` | 30 | 1498974 | 1488897–1515817 | 2.1% | 667 | 0.17 | 238284 | 8 |
+| `BenchmarkDirectAppendBatch/records-1/payload-4096` | 30 | 1577272 | 1569459–1605974 | 6.5% | 634 | 2.59 | 252458 | 8 |
+| `BenchmarkDirectAppendBatch/records-256/payload-1024` | 30 | 3846572 | 3826105–4976886 | 11.1% | 66552 | 68.15 | 2155922 | 537 |
+| `BenchmarkDirectAppendBatch/records-256/payload-256` | 30 | 2205291 | 2195550–2260459 | 9.5% | 116084 | 29.72 | 713624 | 536 |
+| `BenchmarkDirectAppendBatch/records-256/payload-4096` | 30 | 9695908 | 9432116–10146687 | 3.8% | 26403 | 108.14 | 9388313 | 540 |
+| `BenchmarkDirectAppendBatch/records-64/payload-1024` | 30 | 2082900 | 2075087–2327665 | 7.1% | 30726 | 31.46 | 555092 | 147 |
+| `BenchmarkDirectAppendBatch/records-64/payload-256` | 30 | 1659566 | 1653940–1677051 | 4.1% | 38564 | 9.87 | 264380 | 147 |
+| `BenchmarkDirectAppendBatch/records-64/payload-4096` | 30 | 3776398 | 3748473–4590311 | 9.6% | 16947 | 69.41 | 2234001 | 149 |
+| `BenchmarkDirectAppendBatch/records-8/payload-1024` | 30 | 1624106 | 1616171–1649181 | 4.2% | 4926 | 5.04 | 284245 | 27 |
+| `BenchmarkDirectAppendBatch/records-8/payload-256` | 30 | 1574344 | 1568635–1582565 | 2.7% | 5082 | 1.30 | 246606 | 27 |
+| `BenchmarkDirectAppendBatch/records-8/payload-4096` | 30 | 1783909 | 1774667–1808046 | 6.0% | 4484 | 18.37 | 334146 | 29 |
+| `BenchmarkFetch/segment` | 30 | 73045 | 63740–73986 | 6.1% | 1752346 | 448.60 | 193886 | 258 |
+| `BenchmarkFetch/tail` | 30 | 22917 | 22638–25730 | 5.5% | 5585434 | 1429.88 | 49152 | 129 |
+| `BenchmarkFetchParallel` | 30 | 83232 | 81869–101889 | 9.2% | 1537875 | 393.69 | 193888 | 258 |
+| `BenchmarkIngressAppend` | 30 | 1521768 | 1482257–1693052 | 46.9% | 657 | 0.17 | 238650 | 18 |
+| `BenchmarkIngressAppendParallel/producers-1/payload-1024` | 30 | 1561874 | 1542056–1731682 | 6.2% | 640 | 0.66 | 240702 | 19 |
+| `BenchmarkIngressAppendParallel/producers-1/payload-256` | 30 | 1543152 | 1521430–1831367 | 13.8% | 648 | 0.17 | 238510 | 19 |
+| `BenchmarkIngressAppendParallel/producers-1/payload-4096` | 30 | 1625655 | 1617384–1783594 | 5.6% | 615 | 2.52 | 254601 | 19 |
+| `BenchmarkIngressAppendParallel/producers-1/payload-64` | 30 | 1532010 | 1496506–1572532 | 7.9% | 653 | 0.04 | 244388 | 19 |
+| `BenchmarkIngressAppendParallel/producers-16/payload-1024` | 30 | 204864 | 203959–209047 | 3.0% | 4882 | 5.00 | 37480 | 12 |
+| `BenchmarkIngressAppendParallel/producers-16/payload-256` | 30 | 197873 | 196972–199154 | 0.5% | 5054 | 1.29 | 32580 | 12 |
+| `BenchmarkIngressAppendParallel/producers-16/payload-4096` | 30 | 224970 | 223620–229210 | 4.6% | 4445 | 18.21 | 41361 | 12 |
+| `BenchmarkIngressAppendParallel/producers-16/payload-64` | 30 | 191328 | 190292–194553 | 3.3% | 5226 | 0.33 | 31388 | 12 |
+| `BenchmarkIngressAppendParallel/producers-2/payload-1024` | 30 | 1544443 | 1533449–1619359 | 4.9% | 648 | 0.66 | 246746 | 19 |
+| `BenchmarkIngressAppendParallel/producers-2/payload-256` | 30 | 1523468 | 1499546–1682036 | 6.5% | 656 | 0.17 | 243129 | 18 |
+| `BenchmarkIngressAppendParallel/producers-2/payload-4096` | 30 | 1602740 | 1588923–1646881 | 4.4% | 624 | 2.56 | 256892 | 19 |
+| `BenchmarkIngressAppendParallel/producers-2/payload-64` | 30 | 1512406 | 1490047–1553704 | 3.4% | 661 | 0.04 | 244472 | 19 |
+| `BenchmarkIngressAppendParallel/producers-32/payload-1024` | 30 | 104254 | 103550–104994 | 1.8% | 9592 | 9.82 | 17826 | 12 |
+| `BenchmarkIngressAppendParallel/producers-32/payload-256` | 30 | 100945 | 100173–101470 | 2.8% | 9906 | 2.54 | 17839 | 11 |
+| `BenchmarkIngressAppendParallel/producers-32/payload-4096` | 30 | 136992 | 134682–148435 | 4.8% | 7300 | 29.90 | 39686 | 12 |
+| `BenchmarkIngressAppendParallel/producers-32/payload-64` | 30 | 97571 | 96870–98129 | 2.3% | 10249 | 0.66 | 16500 | 11 |
+| `BenchmarkIngressAppendParallel/producers-4/payload-1024` | 30 | 789330 | 783869–793907 | 2.2% | 1266 | 1.30 | 120852 | 16 |
+| `BenchmarkIngressAppendParallel/producers-4/payload-256` | 30 | 763426 | 756618–768156 | 0.6% | 1310 | 0.34 | 120122 | 16 |
+| `BenchmarkIngressAppendParallel/producers-4/payload-4096` | 30 | 830231 | 827061–835326 | 2.7% | 1204 | 4.93 | 136778 | 16 |
+| `BenchmarkIngressAppendParallel/producers-4/payload-64` | 30 | 758850 | 754754–763163 | 2.4% | 1318 | 0.08 | 119996 | 16 |
+| `BenchmarkIngressAppendParallel/producers-64/payload-1024` | 30 | 57210 | 56813–63109 | 5.7% | 17480 | 17.90 | 12301 | 11 |
+| `BenchmarkIngressAppendParallel/producers-64/payload-256` | 30 | 51558 | 51231–52055 | 2.5% | 19396 | 4.96 | 10161 | 11 |
+| `BenchmarkIngressAppendParallel/producers-64/payload-4096` | 30 | 90289 | 88042–108622 | 8.1% | 11076 | 45.36 | 40021 | 11 |
+| `BenchmarkIngressAppendParallel/producers-64/payload-64` | 30 | 49724 | 49565–50200 | 4.1% | 20111 | 1.29 | 9062 | 11 |
+| `BenchmarkIngressAppendParallel/producers-8/payload-1024` | 30 | 402438 | 400463–404131 | 5.5% | 2485 | 2.54 | 66646 | 14 |
+| `BenchmarkIngressAppendParallel/producers-8/payload-256` | 30 | 385405 | 383329–388419 | 0.6% | 2594 | 0.66 | 62056 | 13 |
+| `BenchmarkIngressAppendParallel/producers-8/payload-4096` | 30 | 407944 | 406064–416656 | 3.2% | 2451 | 10.04 | 62272 | 14 |
+| `BenchmarkIngressAppendParallel/producers-8/payload-64` | 30 | 381865 | 379783–384252 | 2.1% | 2619 | 0.17 | 61124 | 13 |
+| `BenchmarkIngressBatchLinger/producers-32/linger-0s` | 30 | 104228 | 103337–106738 | 2.0% | 9594 | 9.82 | 17832 | 12 |
+| `BenchmarkIngressBatchLinger/producers-32/linger-100µs` | 30 | 99384 | 95942–100862 | 3.2% | 10062 | 10.30 | 12925 | 11 |
+| `BenchmarkIngressBatchLinger/producers-32/linger-1ms` | 30 | 99162 | 98672–100332 | 3.8% | 10084 | 10.32 | 12705 | 11 |
+| `BenchmarkIngressBatchLinger/producers-32/linger-5ms` | 30 | 276769 | 263343–290522 | 4.3% | 3614 | 3.70 | 12218 | 11 |
+| `BenchmarkIngressBatchLinger/producers-64/linger-0s` | 30 | 57344 | 56870–59833 | 4.8% | 17439 | 17.86 | 12440 | 11 |
+| `BenchmarkIngressBatchLinger/producers-64/linger-100µs` | 30 | 48637 | 47973–57244 | 8.5% | 20560 | 21.05 | 11374 | 11 |
+| `BenchmarkIngressBatchLinger/producers-64/linger-1ms` | 30 | 54984 | 54413–65172 | 7.9% | 18187 | 18.62 | 10863 | 11 |
+| `BenchmarkIngressBatchLinger/producers-64/linger-5ms` | 30 | 149939 | 142155–158228 | 4.7% | 6670 | 6.83 | 10811 | 11 |
+| `BenchmarkIngressBatchLinger/producers-8/linger-0s` | 30 | 401606 | 399725–404486 | 0.5% | 2490 | 2.55 | 66693 | 14 |
+| `BenchmarkIngressBatchLinger/producers-8/linger-100µs` | 30 | 363542 | 361863–369436 | 3.8% | 2750 | 2.81 | 26520 | 13 |
+| `BenchmarkIngressBatchLinger/producers-8/linger-1ms` | 30 | 372640 | 370180–375848 | 0.6% | 2684 | 2.75 | 25054 | 13 |
+| `BenchmarkIngressBatchLinger/producers-8/linger-5ms` | 30 | 1041208 | 1036114–1082679 | 3.7% | 960 | 0.98 | 14727 | 13 |
+
+Variance notes:
+
+- `BenchmarkDirectAppendBatch/records-256/payload-1024`: 11.1% CV.
+- `BenchmarkIngressAppend`: 46.9% CV.
+- `BenchmarkIngressAppendParallel/producers-1/payload-256`: 13.8% CV.
+
+The raw run artifacts and machine-readable analysis are preserved outside the
+repository. This is host-specific evidence, not a portable throughput
+guarantee.
 
 <!-- microbenchmark-evidence:commit=a6955eaf4bb9b38193aba82e3c30429b1b9bbb11,date=2026-09-26 -->
 
