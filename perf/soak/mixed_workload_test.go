@@ -189,6 +189,7 @@ type soakMetrics struct {
 	stableOffered          atomic.Uint64
 	stableAcknowledged     atomic.Uint64
 	warmupNanos            uint64
+	warmupElapsedNanos     uint64
 	partitions             [soakPartitionCount]soakPartitionMetrics
 	measurementStarted     atomic.Int64
 	measurementFinished    atomic.Int64
@@ -350,19 +351,25 @@ func TestMixedWorkloadSoak(t *testing.T) {
 	if warmup > 0 {
 		warmupMetrics := metrics
 		warmupMetrics.startMeasurement(time.Now())
-		warmupContext, warmupCancel := context.WithTimeout(context.Background(), warmup)
-		warmupErr := runSoakCycle(warmupContext, store, fixture, oracles, warmupMetrics, checkpoint.Run, seed, &sequenceCounter, appendInterval, producerRate, churnInterval, reopenInterval, overloadPeriod, overloadWindow, stressCancellation)
-		warmupCancel()
+		warmupElapsed, warmupErr := runWarmupCycles(warmup, reopenInterval, func(cycleBudget time.Duration) (time.Duration, error) {
+			cycleStarted := time.Now()
+			warmupContext, warmupCancel := context.WithTimeout(context.Background(), cycleBudget)
+			err := runSoakCycle(warmupContext, store, fixture, oracles, warmupMetrics, checkpoint.Run, seed, &sequenceCounter, appendInterval, producerRate, churnInterval, reopenInterval, overloadPeriod, overloadWindow, stressCancellation)
+			warmupCancel()
+			if err != nil {
+				return time.Since(cycleStarted), err
+			}
+			store, fixture, err = openSoakStore(dir)
+			return time.Since(cycleStarted), err
+		})
+		metrics.warmupElapsedNanos = uint64(warmupElapsed)
 		if warmupErr != nil {
 			t.Fatal(warmupErr)
-		}
-		store, fixture, err = openSoakStore(dir)
-		if err != nil {
-			t.Fatal(err)
 		}
 		metrics = newSoakMetrics(sampleInterval, sampleLimit)
 		metrics.stableTopic = fixture.stable.ID
 		metrics.warmupNanos = uint64(warmup)
+		metrics.warmupElapsedNanos = uint64(warmupElapsed)
 		oracles, err = newSoakOracles(fixture, checkpoint, seed, checkpoint.Run)
 		if err != nil {
 			_ = store.Close()
@@ -483,6 +490,7 @@ type soakMetricsReport struct {
 	Completed             bool                           `json:"completed"`
 	Failure               string                         `json:"failure,omitempty"`
 	WarmupNanos           uint64                         `json:"warmup_nanos"`
+	WarmupElapsedNanos    uint64                         `json:"warmup_elapsed_nanos"`
 	MeasurementNanos      uint64                         `json:"measurement_nanos"`
 	TotalNanos            uint64                         `json:"total_nanos"`
 	Phases                []soakPhaseReport              `json:"phases"`
@@ -555,6 +563,7 @@ func writeSoakMetrics(path string, metrics *soakMetrics, oracles map[string]*soa
 		Completed:             completed,
 		Failure:               errorString(failure),
 		WarmupNanos:           metrics.warmupNanos,
+		WarmupElapsedNanos:    metrics.warmupElapsedNanos,
 		MeasurementNanos:      uint64(measurement),
 		TotalNanos:            uint64(elapsed),
 		Phases:                []soakPhaseReport{{Name: "measure", DurationNanos: uint64(measurement)}, {Name: "drain", DurationNanos: uint64(drain)}, {Name: "verify", DurationNanos: uint64(verify)}, {Name: "cleanup", DurationNanos: uint64(cleanup)}},
@@ -928,6 +937,32 @@ func newSoakOracles(fixture soakFixture, checkpoint soakCheckpoint, seed, run ui
 		}
 	}
 	return oracles, nil
+}
+
+func runWarmupCycles(warmup, reopenInterval time.Duration, runCycle func(time.Duration) (time.Duration, error)) (time.Duration, error) {
+	if warmup <= 0 {
+		return 0, nil
+	}
+	if reopenInterval <= 0 {
+		reopenInterval = warmup
+	}
+
+	var elapsed time.Duration
+	for elapsed < warmup {
+		cycleBudget := warmup - elapsed
+		if cycleBudget > reopenInterval {
+			cycleBudget = reopenInterval
+		}
+		cycleElapsed, err := runCycle(cycleBudget)
+		if err != nil {
+			return elapsed + cycleElapsed, err
+		}
+		if cycleElapsed <= 0 {
+			return elapsed, errors.New("soak warmup cycle made no progress")
+		}
+		elapsed += cycleElapsed
+	}
+	return elapsed, nil
 }
 
 func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixture, oracles map[string]*soakOracle, metrics *soakMetrics, run, seed uint64, sequenceCounter *atomic.Uint64, appendInterval time.Duration, producerRate float64, churnInterval, reopenInterval, overloadPeriod, overloadWindow time.Duration, stressCancellation bool) error {

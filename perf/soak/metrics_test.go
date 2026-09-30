@@ -48,6 +48,29 @@ func TestSoakMetricsMeasurementAndSampleCap(t *testing.T) {
 	}
 }
 
+func TestRunWarmupCyclesContinuesAcrossReopens(t *testing.T) {
+	var budgets []time.Duration
+	elapsed, err := runWarmupCycles(30*time.Minute, 10*time.Minute, func(budget time.Duration) (time.Duration, error) {
+		budgets = append(budgets, budget)
+		return budget, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed != 30*time.Minute {
+		t.Fatalf("warmup elapsed = %s, want 30m", elapsed)
+	}
+	want := []time.Duration{10 * time.Minute, 10 * time.Minute, 10 * time.Minute}
+	if len(budgets) != len(want) {
+		t.Fatalf("warmup cycles = %d, want %d (%v)", len(budgets), len(want), want)
+	}
+	for index := range want {
+		if budgets[index] != want[index] {
+			t.Fatalf("cycle %d budget = %s, want %s", index, budgets[index], want[index])
+		}
+	}
+}
+
 func TestSoakOracleObserversDoNotBlock(t *testing.T) {
 	oracle := &soakOracle{}
 	oracle.mu.Lock()

@@ -99,3 +99,14 @@ func TestAnalyzeFlagsIncreasingBacklog(t *testing.T) {
 		t.Fatalf("increasing backlog = %#v", result)
 	}
 }
+
+func TestAnalyzeFlagsIncompleteWarmup(t *testing.T) {
+	warmupElapsed := uint64(10_000_000_000)
+	result := analyze("fixture", rawReport{
+		Version: 2, WarmupNanos: 30_000_000_000, WarmupElapsedNanos: &warmupElapsed,
+		MeasurementNanos: 1_000_000_000, Oracles: map[string]json.RawMessage{"stable": {}},
+	})
+	if result.Valid || !strings.Contains(strings.Join(result.Reasons, "; "), "warmup elapsed") {
+		t.Fatalf("incomplete warmup = %#v", result)
+	}
+}
