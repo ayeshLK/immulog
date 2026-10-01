@@ -13,6 +13,7 @@ portable throughput guarantees or release thresholds unless explicitly stated.
   - [Soak workloads](#soak-workloads)
   - [Environment and artifacts](#environment-and-artifacts)
 - [Recorded results](#recorded-results)
+  - [Sustained soak — 2026-10-01](#sustained-soak--2026-10-01)
   - [Microbenchmark qualification — 2026-09-29](#microbenchmark-qualification--2026-09-29)
   - [Microbenchmark qualification — 2026-09-26](#microbenchmark-qualification--2026-09-26)
   - [Sustained soak — 2026-09-29–30](#sustained-soak--2026-09-2930)
@@ -270,6 +271,77 @@ limits; it is not a routine local smoke.
 The current evidence sets below are retained here. Older result records were
 removed because the benchmark and soak frameworks evolved; they should not be
 compared directly with these measurements.
+
+### Sustained soak — 2026-10-01
+
+This evidence set contains three isolated sustained-profile runs at commit
+`59d4e344e40c98891bc6aa284fac48eef9387fd4` on `main`. It is the first recorded
+set to use the workload-aware test timeout and measured multi-cycle warmup: all
+three runs completed within the calculated five-hour watchdog and satisfied
+the configured 30-minute warmup.
+
+| Environment | Value |
+|---|---|
+| Run interval | 2026-10-01 06:40:14–20:10:31 (+05:30) |
+| Commit / branch | `59d4e344e40c98891bc6aa284fac48eef9387fd4` / `main` |
+| Processor | Intel(R) Core(TM) i7-10510U CPU @ 1.80GHz |
+| CPU count | 8 logical CPUs |
+| Memory | not captured |
+| OS / kernel | Linux `7.0.0-34-generic` |
+| Architecture | `amd64`, `GOAMD64=v1` |
+| Go | `1.26.2` |
+| Filesystem | ext4 |
+| `GOMAXPROCS` / worktree status | not captured |
+
+Configuration: three isolated sustained-profile runs, four-hour configured
+duration, 30-minute warmup, 10-minute reopen interval, seed `0x5eed5eed`,
+1,000 records/s aggregate producer-rate target, 250ms sample interval, and
+`--churn-interval 0`. The runner selected a 5-hour timeout: 30 minutes of
+warmup, four hours of workload lifecycle, and 30 minutes of shutdown headroom.
+Resource preflights required 24 GiB free space and 65,536 open files. Every
+process exited with status 0 and the analyzer marked every report valid.
+
+| Run | Warmup elapsed | Active measurement | Offered records/s | Acknowledged records/s | Backlog start → end (slope/s) | Delivery/commit lag avg/max | Max open files | Max HeapAlloc | Max RSS | Skipped stats / delivery / commit |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 30m02.7s | 3h41m40s | 945.12 | 945.11 | 0 → 0 (0.00) | 6/863; 6/863 | 530 | 1,252,282,216 B | 1,724,166,144 B | 1,458,539 / 589,606 / 25,844 |
+| 2 | 30m03.8s | 3h39m27s | 948.29 | 948.28 | 0 → 0 (0.00) | 6/860; 6/860 | 530 | 1,229,807,600 B | 1,787,400,192 B | 1,453,493 / 590,802 / 25,916 |
+| 3 | 30m02.9s | 3h42m23s | 940.48 | 940.47 | 0 → 0 (0.00) | 6/885; 6/885 | 530 | 1,225,024,648 B | 1,585,455,104 B | 1,388,527 / 583,208 / 27,736 |
+
+Lag values are records: average/max delivery followed by average/max commit.
+Each run had zero assignment losses, zero dropped samples, and zero overload
+calls. Stable-topic oracles verified through their next offset with no
+retention skips; retained-topic oracles passed with expected retention
+accounting. Unknown append outcomes were 95, 101, and 108; known rejections
+were 4, 2, and 0, respectively. The high skipped observer/oracle counts report
+nonblocking observations that found busy state; they are not lost samples or
+failed correctness checks.
+
+Acknowledged rates range from 940.47 to 948.28 records/s, average 944.62
+records/s, with zero sampled stable-consumer backlog growth and a flat
+open-file high-water mark. This is consistent with the retained comparable
+local evidence near 942–946 records/s. The producer schedule again realized
+less than its 1,000 records/s target, so the result is local stability evidence
+near 945 acknowledged records/s—not qualification at a realized 1,000
+records/s or a capacity ceiling.
+
+Compared with the 2026-09-29–30 same-host set, average acknowledged rate moved
+from 946.23 to 944.62 records/s (-0.17%). The new run-to-run range is wider
+(940.47–948.28 versus 944.51–947.60 records/s), but backlog remained flat and
+maximum delivery/commit lag fell from 1,226–1,409 records to 860–885 records.
+The open-file high-water mark was unchanged. Maximum sampled HeapAlloc rose by
+about 4% (1.25 GB versus 1.20 GB), while maximum sampled RSS rose by about 15%
+(1.79 GB versus 1.56 GB). Because the commits differ and this set completed the
+full configured warmup, the memory movement is an observation for follow-up,
+not evidence by itself of a regression.
+
+The active measurement intervals exclude reopen-cycle drain, verification,
+and cleanup. Those excluded phases account for the difference between the
+configured four-hour lifecycle and the approximately 3h39m–3h42m active
+measurement denominators. Unlike the earlier retained soak sets, the measured
+warmups exceed the configured 30 minutes. The runner did not capture a
+worktree diff, so the recorded commit alone does not prove the worktree was
+clean. These are host-specific stability results, not portable throughput
+guarantees.
 
 ### Sustained soak — 2026-09-29–30
 
