@@ -21,7 +21,7 @@ Options:
       --sample-limit VALUE      Maximum retained samples (default: 100000)
       --analyze                 Write a Markdown summary beside metrics.json
   -c, --churn-interval VALUE    Membership replacement interval, or 0 to disable (default: 750ms)
-  -t, --timeout VALUE            Go test timeout (default: 4h30m)
+  -t, --timeout VALUE            Go test timeout (default: auto)
   -f, --minimum-free-bytes VALUE Minimum free space or auto (default: auto, ~24 GiB for 4h)
   -n, --minimum-open-files VALUE Minimum open-file limit or auto (default: auto, ~65536 for 4h)
   -R, --run-dir PATH             Evidence directory (default: $HOME/immulog-soak-TIMESTAMP)
@@ -34,7 +34,9 @@ Options:
 The auto resource estimates use conservative rates from the recorded 30-minute
 qualification run. Set a numeric value to override an estimate or 0 to disable
 the corresponding preflight. The data directory is preserved so its checkpoint
-can be inspected or reused for a later resumable run.
+can be inspected or reused for a later resumable run. An automatic timeout adds
+warmup, measurement, and a shutdown allowance ranging from 60 seconds to 30
+minutes; explicit shorter timeouts are rejected before the test starts.
 EOF
 }
 
@@ -60,7 +62,7 @@ sample_limit=100000
 analyze=0
 rate_sweep=''
 churn_interval=750ms
-timeout=4h30m
+timeout=auto
 minimum_free_bytes=auto
 minimum_open_files=auto
 
@@ -330,27 +332,7 @@ if ! [[ "$sample_limit" =~ ^[1-9][0-9]*$ ]]; then
 	echo "sample limit must be a positive integer" >&2
 	exit 2
 fi
-parse_duration_seconds() {
-	local remaining=$1 total=0 number unit factor
-	while [[ -n "$remaining" ]]; do
-		if [[ ! "$remaining" =~ ^([0-9]+([.][0-9]+)?)(ns|us|µs|ms|s|m|h)(.*)$ ]]; then
-			return 1
-		fi
-		number=${BASH_REMATCH[1]}
-		unit=${BASH_REMATCH[3]}
-		remaining=${BASH_REMATCH[4]}
-		case "$unit" in
-		ns) factor=0.000000001 ;;
-		us|µs) factor=0.000001 ;;
-		ms) factor=0.001 ;;
-		s) factor=1 ;;
-		m) factor=60 ;;
-		h) factor=3600 ;;
-		esac
-		total=$(awk -v total="$total" -v number="$number" -v factor="$factor" 'BEGIN { printf "%.0f", total + number * factor }')
-	done
-	printf '%s\n' "$total"
-}
+source perf/soak/timeout.sh
 
 next_power_of_two() {
 	local value=$1 power=1
@@ -378,6 +360,28 @@ duration_seconds=$(parse_duration_seconds "$duration") || {
 if (( duration_seconds <= 0 )); then
 	echo "duration must be positive, got $duration" >&2
 	exit 2
+fi
+warmup_seconds=$(parse_duration_seconds "$warmup") || {
+	echo "warmup must use Go duration syntax, got $warmup" >&2
+	exit 2
+}
+if (( warmup_seconds < 0 )); then
+	echo "warmup must be nonnegative, got $warmup" >&2
+	exit 2
+fi
+shutdown_grace_seconds=$(soak_shutdown_grace_seconds "$duration_seconds")
+minimum_timeout_seconds=$(soak_minimum_timeout_seconds "$duration_seconds" "$warmup_seconds")
+if [[ "$timeout" == auto ]]; then
+	timeout="${minimum_timeout_seconds}s"
+else
+	timeout_seconds=$(parse_duration_seconds "$timeout") || {
+		echo "timeout must be auto or use Go duration syntax, got $timeout" >&2
+		exit 2
+	}
+	if (( timeout_seconds < minimum_timeout_seconds )); then
+		echo "timeout $timeout is too short: warmup $warmup + measurement $duration + shutdown grace ${shutdown_grace_seconds}s requires at least ${minimum_timeout_seconds}s" >&2
+		exit 2
+	fi
 fi
 if [[ "$minimum_free_bytes" == auto ]]; then
 	growth_bytes=$((duration_seconds * 1572864))
@@ -412,6 +416,7 @@ fi
 	printf 'runs=%s\n' "$runs"
 	printf 'profile=%s\n' "$profile"
 	printf 'duration_seconds=%s\n' "$duration_seconds"
+	printf 'warmup_seconds=%s\n' "$warmup_seconds"
 	printf 'seed=%s\n' "$seed"
 	printf 'reopen_interval=%s\n' "$reopen_interval"
 	printf 'append_interval=%s\n' "$append_interval"
@@ -420,6 +425,8 @@ fi
 	printf 'sample_limit=%s\n' "$sample_limit"
 	printf 'churn_interval=%s\n' "$churn_interval"
 	printf 'timeout=%s\n' "$timeout"
+	printf 'minimum_timeout_seconds=%s\n' "$minimum_timeout_seconds"
+	printf 'shutdown_grace_seconds=%s\n' "$shutdown_grace_seconds"
 	printf 'minimum_free_bytes=%s\n' "$minimum_free_bytes"
 	printf 'minimum_open_files=%s\n' "$minimum_open_files"
 	printf 'open_file_limit=%s\n' "$open_file_limit"

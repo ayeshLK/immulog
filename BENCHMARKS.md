@@ -143,7 +143,10 @@ steady-state throughput measurements.
 Use a dedicated data directory and preserve the runner's artifacts. Do not
 point a soak at an application data directory. The runner automatically
 estimates disk and open-file requirements for long runs; keep those preflights
-enabled for sustained and qualification tests.
+enabled for sustained and qualification tests. When `--timeout` is omitted,
+the runner adds warmup, measurement, and a bounded shutdown allowance. An
+explicit timeout shorter than that calculated budget is rejected before the
+test starts.
 
 Quick mixed-profile correctness smoke (resource preflights are intentionally
 disabled only for this short local run):
@@ -168,7 +171,7 @@ perf/soak/run.sh \
   --profile sustained \
   --warmup 30s \
   --duration 20s \
-  --timeout 90s \
+  --timeout 2m \
   --minimum-free-bytes 0 \
   --minimum-open-files 0 \
   --analyze
@@ -195,7 +198,7 @@ perf/soak/run.sh \
   --profile sustained \
   --warmup 5m \
   --duration 4h \
-  --timeout 4h30m \
+  --timeout 5h \
   --seed 0x5eed5eed \
   --producer-rate 1000 \
   --churn-interval 0 \

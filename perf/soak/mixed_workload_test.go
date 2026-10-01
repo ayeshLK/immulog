@@ -53,6 +53,7 @@ const (
 	soakLatencyBucketCount = 12
 	soakDefaultSampleEvery = 250 * time.Millisecond
 	soakDefaultSampleLimit = 100_000
+	soakWorkerStopTimeout  = 30 * time.Second
 )
 
 type soakCheckpoint struct {
@@ -1053,9 +1054,18 @@ func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixt
 		}
 	}
 	metrics.addMeasurement(time.Since(cycleStart))
-	cancel()
-	workerWait.Wait()
 	drainStarted := time.Now()
+	cancel()
+	workerContext, workerCancel := context.WithTimeout(context.Background(), soakWorkerStopTimeout)
+	workerErr := waitForSoakWorkers(workerContext, &workerWait)
+	workerCancel()
+	if workerErr != nil {
+		metrics.recordPhase("drain", time.Since(drainStarted))
+		stack := make([]byte, 1<<20)
+		stack = stack[:runtime.Stack(stack, true)]
+		fmt.Fprintf(os.Stderr, "soak worker shutdown diagnostics:\n%s", stack)
+		return fmt.Errorf("stop soak workers after cancellation: %w", workerErr)
+	}
 	current := handle.currentConsumer()
 	if current != nil {
 		if closeErr := current.Close(); closeErr != nil && firstErr == nil {
@@ -1088,6 +1098,20 @@ func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixt
 		firstErr = fmt.Errorf("close soak store: %w", closeErr)
 	}
 	return firstErr
+}
+
+func waitForSoakWorkers(ctx context.Context, workers *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func producerLoop(ctx context.Context, started time.Time, partition *storage.Partition, seed, run uint64, producer uint32, sequenceCounter *atomic.Uint64, appendInterval time.Duration, producerRate float64, overloadPeriod, overloadWindow time.Duration, stressCancellation bool, metrics *soakMetrics, oracle *soakOracle, report func(error)) {

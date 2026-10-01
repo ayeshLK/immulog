@@ -15,8 +15,10 @@
 package soak
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -69,6 +71,41 @@ func TestRunWarmupCyclesContinuesAcrossReopens(t *testing.T) {
 			t.Fatalf("cycle %d budget = %s, want %s", index, budgets[index], want[index])
 		}
 	}
+}
+
+func TestWaitForSoakWorkersReturnsAfterCompletion(t *testing.T) {
+	var workers sync.WaitGroup
+	workers.Add(1)
+	done := make(chan struct{})
+	go func() {
+		defer workers.Done()
+		<-done
+	}()
+	close(done)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := waitForSoakWorkers(ctx, &workers); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWaitForSoakWorkersHonorsDeadline(t *testing.T) {
+	var workers sync.WaitGroup
+	workers.Add(1)
+	release := make(chan struct{})
+	go func() {
+		defer workers.Done()
+		<-release
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := waitForSoakWorkers(ctx, &workers); !errors.Is(err, context.Canceled) {
+		close(release)
+		workers.Wait()
+		t.Fatalf("worker wait error = %v, want context.Canceled", err)
+	}
+	close(release)
+	workers.Wait()
 }
 
 func TestSoakOracleObserversDoNotBlock(t *testing.T) {

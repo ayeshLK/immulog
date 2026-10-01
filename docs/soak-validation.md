@@ -84,7 +84,7 @@ perf/soak/run.sh \
   --reopen-interval 10m \
   --churn-interval 0 \
   --analyze \
-  --timeout 4h30m \
+  --timeout 5h \
   --run-dir /path/to/dedicated/qualification
 ```
 
@@ -92,3 +92,7 @@ The four-hour run is still required when claiming four-hour durability or
 liveness evidence. Do not replace it with a higher producer rate: that may
 accelerate resource pressure, but it changes the workload and is stress
 exploration rather than equivalent qualification.
+
+The runner calculates a timeout when `--timeout` is omitted. An explicit
+timeout must cover warmup, measurement, and a bounded shutdown allowance; the
+runner rejects shorter values before starting the test process.

@@ -71,6 +71,9 @@ jobs:
       - name: Check performance workflow input handling
         shell: bash
         run: bash scripts/check-performance-workflow.sh
+      - name: Check soak timeout budgeting
+        shell: bash
+        run: bash scripts/check-soak-timeout.sh
       - name: Verify module files
         run: |
           go mod tidy
