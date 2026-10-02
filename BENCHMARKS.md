@@ -13,6 +13,7 @@ portable throughput guarantees or release thresholds unless explicitly stated.
   - [Soak workloads](#soak-workloads)
   - [Environment and artifacts](#environment-and-artifacts)
 - [Recorded results](#recorded-results)
+  - [Microbenchmark qualification — 2026-10-01](#microbenchmark-qualification--2026-10-01)
   - [Sustained soak — 2026-10-01](#sustained-soak--2026-10-01)
   - [Microbenchmark qualification — 2026-09-29](#microbenchmark-qualification--2026-09-29)
   - [Microbenchmark qualification — 2026-09-26](#microbenchmark-qualification--2026-09-26)
@@ -271,6 +272,118 @@ limits; it is not a routine local smoke.
 The current evidence sets below are retained here. Older result records were
 removed because the benchmark and soak frameworks evolved; they should not be
 compared directly with these measurements.
+
+<!-- microbenchmark-evidence:commit=f8e42e909c1774cc3198060c4639aa1b76a4ff6c,date=2026-10-01 -->
+
+### Microbenchmark qualification — 2026-10-01
+
+Configuration: `qualification` profile, `all` suite, 10 seconds per sample,
+10 samples per process run, 3 independent runs, and `-cpu 1` (30 samples per
+benchmark). All three runs and the aggregate analyzer completed successfully.
+
+| Environment | Value |
+|---|---|
+| Run start | 2026-10-01 21:00:55 (+05:30) |
+| Commit / branch | `f8e42e909c1774cc3198060c4639aa1b76a4ff6c` / `main` |
+| Worktree status | Clean; runner used `allow_dirty=0` |
+| Processor | Intel(R) Core(TM) i7-10510U CPU @ 1.80GHz |
+| CPU count | 8 logical CPUs; benchmarks ran with `-cpu 1` |
+| Memory | Not captured |
+| OS / kernel | Linux `7.0.0-34-generic` |
+| Architecture | `amd64`, `GOAMD64=v1` |
+| Go | `1.26.2` |
+| Filesystem | ext4; 64% used at capture time |
+
+Values are medians across all captured samples; P10–P90 shows ns/op
+variability.
+
+| Benchmark | Samples | Median ns/op | P10–P90 ns/op | CV | Median records/s | Median MB/s | Median B/op | Median allocs/op |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `BenchmarkDirectAppendBatch/records-1/payload-1024` | 30 | 2646264 | 2544858–2697846 | 2.7% | 378 | 0.39 | 147480 | 8 |
+| `BenchmarkDirectAppendBatch/records-1/payload-256` | 30 | 2593010 | 2472648–2653575 | 3.1% | 386 | 0.10 | 141208 | 8 |
+| `BenchmarkDirectAppendBatch/records-1/payload-4096` | 30 | 2824186 | 2730088–2864140 | 2.4% | 354 | 1.45 | 145946 | 8 |
+| `BenchmarkDirectAppendBatch/records-256/payload-1024` | 30 | 6763730 | 6509313–7887249 | 9.6% | 37849 | 38.76 | 2155898 | 537 |
+| `BenchmarkDirectAppendBatch/records-256/payload-256` | 30 | 3905796 | 3795317–4104335 | 9.9% | 65544 | 16.78 | 712422 | 536 |
+| `BenchmarkDirectAppendBatch/records-256/payload-4096` | 30 | 15194578 | 14274720–24901990 | 25.3% | 16848 | 69.01 | 9388305 | 540 |
+| `BenchmarkDirectAppendBatch/records-64/payload-1024` | 30 | 3613966 | 3530172–3651923 | 4.9% | 17709 | 18.13 | 553930 | 147 |
+| `BenchmarkDirectAppendBatch/records-64/payload-256` | 30 | 2976810 | 2882201–3027294 | 5.9% | 21500 | 5.50 | 257670 | 147 |
+| `BenchmarkDirectAppendBatch/records-64/payload-4096` | 30 | 6875100 | 6728413–8868481 | 11.6% | 9309 | 38.13 | 2233886 | 149 |
+| `BenchmarkDirectAppendBatch/records-8/payload-1024` | 30 | 2873260 | 2788185–2919833 | 4.8% | 2784 | 2.85 | 182934 | 27 |
+| `BenchmarkDirectAppendBatch/records-8/payload-256` | 30 | 2775271 | 2717467–2813739 | 4.7% | 2882 | 0.74 | 145241 | 27 |
+| `BenchmarkDirectAppendBatch/records-8/payload-4096` | 30 | 3126999 | 3071647–3203606 | 7.1% | 2558 | 10.48 | 334145 | 29 |
+| `BenchmarkFetch/segment` | 30 | 71646 | 62861–76423 | 8.0% | 1789194 | 458.03 | 193886 | 258 |
+| `BenchmarkFetch/tail` | 30 | 23272 | 22836–24944 | 3.5% | 5500336 | 1408.09 | 49152 | 129 |
+| `BenchmarkFetchParallel` | 30 | 85155 | 83940–91044 | 3.5% | 1503140 | 384.80 | 193888 | 258 |
+| `BenchmarkIngressAppend` | 30 | 2618596 | 2146343–2693941 | 36.9% | 382 | 0.10 | 143286 | 18 |
+| `BenchmarkIngressAppendParallel/producers-1/payload-1024` | 30 | 2698027 | 2603566–2914953 | 6.1% | 371 | 0.38 | 144300 | 19 |
+| `BenchmarkIngressAppendParallel/producers-1/payload-256` | 30 | 2655259 | 2361497–2751404 | 12.2% | 377 | 0.10 | 140523 | 19 |
+| `BenchmarkIngressAppendParallel/producers-1/payload-4096` | 30 | 2906116 | 2669164–2978244 | 10.0% | 344 | 1.41 | 150894 | 19 |
+| `BenchmarkIngressAppendParallel/producers-1/payload-64` | 30 | 2604901 | 2322896–2688421 | 34.7% | 384 | 0.02 | 141621 | 19 |
+| `BenchmarkIngressAppendParallel/producers-16/payload-1024` | 30 | 358660 | 330328–369902 | 4.7% | 2788 | 2.85 | 26649 | 12 |
+| `BenchmarkIngressAppendParallel/producers-16/payload-256` | 30 | 335811 | 290996–344948 | 7.0% | 2978 | 0.76 | 20793 | 12 |
+| `BenchmarkIngressAppendParallel/producers-16/payload-4096` | 30 | 407657 | 377738–418166 | 6.8% | 2454 | 10.04 | 42852 | 13 |
+| `BenchmarkIngressAppendParallel/producers-16/payload-64` | 30 | 320443 | 278918–328282 | 7.4% | 3120 | 0.20 | 19910 | 12 |
+| `BenchmarkIngressAppendParallel/producers-2/payload-1024` | 30 | 2622728 | 2184594–2682172 | 8.4% | 381 | 0.39 | 148534 | 18 |
+| `BenchmarkIngressAppendParallel/producers-2/payload-256` | 30 | 2607626 | 2195580–2652782 | 10.2% | 384 | 0.10 | 141511 | 18 |
+| `BenchmarkIngressAppendParallel/producers-2/payload-4096` | 30 | 2789988 | 2529937–2948898 | 8.0% | 358 | 1.46 | 157450 | 18 |
+| `BenchmarkIngressAppendParallel/producers-2/payload-64` | 30 | 2587820 | 2312797–2660850 | 9.6% | 386 | 0.02 | 142914 | 18 |
+| `BenchmarkIngressAppendParallel/producers-32/payload-1024` | 30 | 191842 | 187137–196510 | 2.2% | 5212 | 5.34 | 17702 | 12 |
+| `BenchmarkIngressAppendParallel/producers-32/payload-256` | 30 | 176030 | 171170–180763 | 6.9% | 5681 | 1.46 | 12322 | 12 |
+| `BenchmarkIngressAppendParallel/producers-32/payload-4096` | 30 | 263102 | 249927–272003 | 6.5% | 3800 | 15.57 | 39008 | 12 |
+| `BenchmarkIngressAppendParallel/producers-32/payload-64` | 30 | 165356 | 156842–168740 | 3.4% | 6048 | 0.39 | 10955 | 12 |
+| `BenchmarkIngressAppendParallel/producers-4/payload-1024` | 30 | 1351738 | 1141578–1392639 | 9.8% | 740 | 0.76 | 77544 | 16 |
+| `BenchmarkIngressAppendParallel/producers-4/payload-256` | 30 | 1290398 | 1073607–1327339 | 9.1% | 775 | 0.20 | 77832 | 16 |
+| `BenchmarkIngressAppendParallel/producers-4/payload-4096` | 30 | 1434615 | 1184064–1497180 | 9.4% | 697 | 2.85 | 93963 | 16 |
+| `BenchmarkIngressAppendParallel/producers-4/payload-64` | 30 | 1284724 | 1058741–1330356 | 9.4% | 778 | 0.05 | 76496 | 16 |
+| `BenchmarkIngressAppendParallel/producers-64/payload-1024` | 30 | 110203 | 106453–113860 | 5.5% | 9074 | 9.29 | 12336 | 11 |
+| `BenchmarkIngressAppendParallel/producers-64/payload-256` | 30 | 95924 | 92490–100504 | 6.0% | 10425 | 2.67 | 7990 | 11 |
+| `BenchmarkIngressAppendParallel/producers-64/payload-4096` | 30 | 198726 | 184487–217085 | 8.0% | 5032 | 20.61 | 38902 | 11 |
+| `BenchmarkIngressAppendParallel/producers-64/payload-64` | 30 | 88614 | 87201–91222 | 2.0% | 11285 | 0.72 | 6388 | 11 |
+| `BenchmarkIngressAppendParallel/producers-8/payload-1024` | 30 | 687130 | 519705–702854 | 10.9% | 1456 | 1.49 | 42595 | 14 |
+| `BenchmarkIngressAppendParallel/producers-8/payload-256` | 30 | 648132 | 541876–664615 | 8.0% | 1543 | 0.40 | 38344 | 14 |
+| `BenchmarkIngressAppendParallel/producers-8/payload-4096` | 30 | 737519 | 590270–761693 | 9.3% | 1356 | 5.55 | 62907 | 14 |
+| `BenchmarkIngressAppendParallel/producers-8/payload-64` | 30 | 643390 | 576595–657270 | 8.3% | 1554 | 0.10 | 37294 | 13 |
+| `BenchmarkIngressBatchLinger/producers-32/linger-0s` | 30 | 194798 | 192184–200392 | 2.8% | 5134 | 5.25 | 17792 | 12 |
+| `BenchmarkIngressBatchLinger/producers-32/linger-100µs` | 30 | 217487 | 187533–236670 | 9.3% | 4598 | 4.71 | 16886 | 12 |
+| `BenchmarkIngressBatchLinger/producers-32/linger-1ms` | 30 | 174898 | 165640–180687 | 4.3% | 5718 | 5.86 | 12784 | 11 |
+| `BenchmarkIngressBatchLinger/producers-32/linger-5ms` | 30 | 292095 | 285030–297149 | 3.2% | 3424 | 3.50 | 12100 | 11 |
+| `BenchmarkIngressBatchLinger/producers-64/linger-0s` | 30 | 108808 | 103059–114210 | 8.5% | 9190 | 9.41 | 12330 | 11 |
+| `BenchmarkIngressBatchLinger/producers-64/linger-100µs` | 30 | 130636 | 118693–141250 | 9.4% | 7655 | 7.84 | 12282 | 11 |
+| `BenchmarkIngressBatchLinger/producers-64/linger-1ms` | 30 | 108340 | 101434–114315 | 4.6% | 9230 | 9.46 | 11008 | 11 |
+| `BenchmarkIngressBatchLinger/producers-64/linger-5ms` | 30 | 157988 | 156308–160456 | 4.9% | 6330 | 6.48 | 10832 | 11 |
+| `BenchmarkIngressBatchLinger/producers-8/linger-0s` | 30 | 689354 | 680790–707860 | 1.5% | 1450 | 1.49 | 42356 | 14 |
+| `BenchmarkIngressBatchLinger/producers-8/linger-100µs` | 30 | 557937 | 546584–576691 | 5.7% | 1792 | 1.83 | 28851 | 14 |
+| `BenchmarkIngressBatchLinger/producers-8/linger-1ms` | 30 | 548702 | 533080–569941 | 5.1% | 1822 | 1.87 | 21146 | 13 |
+| `BenchmarkIngressBatchLinger/producers-8/linger-5ms` | 30 | 1051164 | 1035617–1071105 | 2.4% | 951 | 0.97 | 14727 | 13 |
+
+Variance notes:
+
+- `BenchmarkDirectAppendBatch/records-256/payload-4096`: 25.3% CV.
+- `BenchmarkDirectAppendBatch/records-64/payload-4096`: 11.6% CV.
+- `BenchmarkIngressAppend`: 36.9% CV.
+- `BenchmarkIngressAppendParallel/producers-1/payload-256`: 12.2% CV.
+- `BenchmarkIngressAppendParallel/producers-1/payload-64`: 34.7% CV.
+- `BenchmarkIngressAppendParallel/producers-2/payload-256`: 10.2% CV.
+- `BenchmarkIngressAppendParallel/producers-8/payload-1024`: 10.9% CV.
+
+This run is directly comparable with the 2026-09-29 qualification on profile,
+suite, sample count, CPU setting, host, Go version, kernel, and filesystem.
+Fetch medians remained close: segment fetch improved 1.9%, while tail and
+parallel fetch slowed 1.5% and 2.3%, respectively. Durable append results moved
+materially: direct-batch median ns/op increased 56.7–82.1%, single ingress
+increased 72.1%, and parallel-ingress cases increased 67.5–120.1%. Most
+short-linger cases also slowed substantially; the 8-producer and 64-producer
+5ms cases were near the earlier result at +1.0% and +5.4%.
+
+The commit range since 2026-09-29 does not change the append/fetch benchmark
+implementations or storage append/fetch paths. That makes the source of the
+movement unclear: these results establish a same-host observation, but do not
+by themselves distinguish a regression from host, filesystem, or device-state
+effects. Treat the append slowdown as a follow-up signal and repeat the same
+commit under controlled idle conditions before making a regression claim.
+The raw run artifacts and machine-readable analysis are preserved outside the
+repository. This remains host-specific evidence, not a portable throughput
+guarantee.
 
 ### Sustained soak — 2026-10-01
 
