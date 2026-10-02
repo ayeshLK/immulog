@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.4.0](https://github.com/ayeshLK/immulog/compare/v0.3.0...v0.4.0) (2026-10-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* ClusterMetadataTopicID and ConsumerOffsetsTopicID are now functions; callers must add parentheses when obtaining these IDs.
+
+### Features
+
+* add immulog branding assets ([09c5885](https://github.com/ayeshLK/immulog/commit/09c5885d07ea77de66c073571360bf62a8ea72ad))
+* add immulog branding assets ([ebadccc](https://github.com/ayeshLK/immulog/commit/ebadccc47096df5e7244e2b5c1548d52759889a4))
+
+
+### Bug Fixes
+
+* budget soak test shutdown time ([30d6d41](https://github.com/ayeshLK/immulog/commit/30d6d4100b693488fe516b1324ed0cd1b291855a))
+* budget soak timeout for shutdown ([59d4e34](https://github.com/ayeshLK/immulog/commit/59d4e344e40c98891bc6aa284fac48eef9387fd4))
+* enforce retention partition limit ([a6139c5](https://github.com/ayeshLK/immulog/commit/a6139c5007dd9b033694f1075f91f4b5dc87ed45))
+* enforce retention partition limit ([fde6203](https://github.com/ayeshLK/immulog/commit/fde62036fb6ec27b59009465ef9fdaad637f7060))
+* harden performance workflow inputs ([96f83ea](https://github.com/ayeshLK/immulog/commit/96f83ea76a13601678ba8c522a71c8f61b7bde72))
+* honor configured soak warmup ([c13b890](https://github.com/ayeshLK/immulog/commit/c13b8901804772128f0497b4f8fb267c72e2ae87))
+* honor configured soak warmup ([5383dd8](https://github.com/ayeshLK/immulog/commit/5383dd881ae9ffe301954e650ed700ee32e3eb1d))
+* make reserved topic IDs immutable ([5927c87](https://github.com/ayeshLK/immulog/commit/5927c87fb6797558839552af8926945f8007abf6))
+* preserve replacement consumer registration ([7df301c](https://github.com/ayeshLK/immulog/commit/7df301c5feb2c7c4c5645b215de80b7d7fd71a77))
+* preserve replacement consumer registration ([45eb3bd](https://github.com/ayeshLK/immulog/commit/45eb3bdeeb7f3919e18cac39433fa9f05bff7aa8))
+* prevent shell injection in performance workflow inputs ([243c675](https://github.com/ayeshLK/immulog/commit/243c675880d25e95f33f842a1f7e9cbb053781a1))
+
 ## [0.3.0](https://github.com/ayeshLK/immulog/compare/v0.2.0...v0.3.0) (2026-09-26)
 
 
