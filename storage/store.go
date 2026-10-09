@@ -27,7 +27,8 @@ import (
 )
 
 // SnapshotDiagnostics reports optional projection-cache validation or publication
-// failures. Authoritative system-log replay remains available when either field is non-nil.
+// failures. Authoritative legacy replay or generation checkpoint/suffix recovery
+// remains available when either field is non-nil.
 type SnapshotDiagnostics struct {
 	Catalog error
 	Offsets error
@@ -37,6 +38,8 @@ type SnapshotDiagnostics struct {
 // stopped every partition and released the operating-system lock.
 type Store struct {
 	closeMu sync.Mutex
+	// systemMaintenanceMu serializes authoritative metadata generation changes.
+	systemMaintenanceMu sync.Mutex
 	// snapshotMu serializes snapshot publication and keeps it from racing a
 	// close that is about to release directory ownership.
 	snapshotMu          sync.Mutex
@@ -74,6 +77,8 @@ type Store struct {
 	offsetsAdmission    chan struct{}
 	offsetsUnavailable  bool
 	snapshotDiagnostics SnapshotDiagnostics
+	metadataGeneration  uint64
+	systemMaintenance   SystemLogMaintenanceStats
 	metadataUnavailable bool
 	closed              bool
 	openedAt            time.Time
@@ -413,6 +418,8 @@ func OpenWithOptions(dir string, options StoreOptions) (*Store, error) {
 		catalog:      metadata.catalog, offsets: metadata.offsets, catalogState: metadata.projection, catalogAdmission: make(chan struct{}, 1), offsetsState: metadata.offsetsState, consumers: make(map[string]*Consumer), groupConsumers: make(map[string]*GroupConsumer), expiredGroups: make(map[string]bool), offsetsAdmission: make(chan struct{}, 1), snapshotDiagnostics: metadata.snapshotDiagnostics,
 		openedAt: time.Now(), retentionStop: make(chan struct{}), retentionWake: make(chan struct{}, 1), retentionDone: make(chan struct{}),
 	}
+	store.metadataGeneration = metadata.generation
+	store.systemMaintenance.Generation = metadata.generation
 	// System partitions need the store back-reference so their appends route
 	// through the protected control headroom (§7.9).
 	store.catalog.store = store

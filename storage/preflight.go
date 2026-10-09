@@ -17,6 +17,7 @@ package storage
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -177,6 +178,14 @@ func preflightSystemLogDirectory(path string, topic api.TopicID, partition uint3
 	_, _, err := preflightSegmentChain(path, topic, partition, config.SegmentMaxBytes, 0, true, nil)
 	return err
 }
+
+func preflightSystemLogSuffixDirectory(path string, topic api.TopicID, partition uint32, config PartitionConfigV1, initialOffset uint64) error {
+	_, _, err := preflightSegmentChain(path, topic, partition, config.SegmentMaxBytes, initialOffset, true, nil)
+	if errors.Is(err, os.ErrNotExist) {
+		return corrupt(errInvalidSegment, "selected system-log suffix directory is missing")
+	}
+	return err
+}
 func preflightSegmentChain(path string, topic api.TopicID, partition uint32, maxBytes, initialOffset uint64, allowSnapshot bool, retired map[uint64]retiredSegmentEvent) (SegmentHeader, []byte, error) {
 	files, err := discoverSegments(path)
 	if err != nil {
@@ -287,7 +296,7 @@ func isRecognizedSegmentTemporary(name string) bool {
 }
 
 func isRecognizedSnapshotArtifact(name string) bool {
-	return name == snapshotPathName ||
+	return name == snapshotPathName || name == checkpointName ||
 		strings.HasPrefix(name, ".projection-snapshot-") && strings.HasSuffix(name, ".tmp")
 }
 

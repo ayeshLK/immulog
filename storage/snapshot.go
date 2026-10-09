@@ -168,6 +168,9 @@ func projectionPrefixDigest(partition *Partition, storeID StoreID, nextOffset ui
 	running := newPrefixDigest(storeID, partition.topic, partition.partition)
 	buffer := make([]byte, snapshotValidationBufferBytes)
 	var covered uint64
+	if len(partition.segments) != 0 {
+		covered = partition.segments[0].header.BaseOffset
+	}
 	for _, segment := range partition.segments {
 		for _, batch := range segment.batches {
 			end := batch.base + uint64(batch.records)
@@ -383,7 +386,7 @@ type pendingSnapshot struct {
 }
 
 // SaveSnapshots publishes replaceable projection caches for both reserved logs.
-// The authoritative logs remain the only recovery source of truth.
+// Legacy logs or a manifest-selected checkpoint and suffix remain authoritative.
 //
 // The store mutex is held only while the snapshot bytes are built. Writing and
 // syncing them runs outside it, so a snapshot never delays a consumer poll,

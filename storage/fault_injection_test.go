@@ -124,7 +124,7 @@ func (plan *filesystemFaultPlan) shortWriteOnce(operation filesystemOperation, p
 func (plan *filesystemFaultPlan) take(operation filesystemOperation, path string) (filesystemFaultAction, bool) {
 	plan.mu.Lock()
 	defer plan.mu.Unlock()
-	pathMatches := plan.path == "" || plan.exact && path == plan.path || !plan.exact && strings.Contains(path, plan.path)
+	pathMatches := plan.path == "" || plan.exact && path == plan.path || !plan.exact && strings.Contains(filepath.ToSlash(path), filepath.ToSlash(plan.path))
 	if !plan.armed || plan.operation != operation || !pathMatches {
 		return filesystemFaultAction{}, false
 	}

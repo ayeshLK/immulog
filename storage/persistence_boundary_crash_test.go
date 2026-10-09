@@ -59,6 +59,12 @@ func TestPersistenceBoundaryCrashRecovery(t *testing.T) {
 		{name: "topic-preparation-sync", setup: setupInitializedStore, verify: verifyNoCreatedTopic},
 		{name: "snapshot-rename", setup: setupSnapshot, verify: verifyOpenableStore},
 		{name: "snapshot-directory-sync", setup: setupSnapshot, verify: verifyOpenableStore},
+		{name: "system-checkpoint-sync", setup: setupSystemCompaction, verify: verifyCreatedTopic},
+		{name: "system-suffix-directory-sync", setup: setupSystemCompaction, verify: verifyCreatedTopic},
+		{name: "system-generation-manifest-rename", setup: setupSystemCompaction, verify: verifyCreatedTopic},
+		{name: "system-active-manifest-rename", setup: setupSystemCompaction, verify: verifyCreatedTopic},
+		{name: "system-active-manifest-directory-sync", setup: setupSystemCompaction, verify: verifyCreatedTopic},
+		{name: "system-old-authority-cleanup", setup: setupSystemCompaction, verify: verifyCreatedTopic},
 		{name: "retention-catalog-sync", setup: setupRetention, verify: verifyRetentionRecovery},
 		{name: "retention-cleanup-close", setup: setupRetention, verify: verifyRetentionRecovery},
 		{name: "recovery-truncate", setup: setupIncompleteTail, verify: verifyRecoveredBaseline},
@@ -106,6 +112,8 @@ func runPersistenceBoundaryCrashHelper() {
 		runCatalogCrashHelper(dir, scenario)
 	case "snapshot-rename", "snapshot-directory-sync":
 		runSnapshotCrashHelper(dir, scenario)
+	case "system-checkpoint-sync", "system-suffix-directory-sync", "system-generation-manifest-rename", "system-active-manifest-rename", "system-active-manifest-directory-sync", "system-old-authority-cleanup":
+		runSystemCompactionCrashHelper(dir, scenario)
 	case "retention-catalog-sync", "retention-cleanup-close":
 		runRetentionCrashHelper(dir, scenario)
 	case "recovery-truncate", "recovery-sync":
@@ -213,6 +221,31 @@ func runSnapshotCrashHelper(dir, scenario string) {
 	crashHelperFailure("snapshot crash boundary was not reached")
 }
 
+func runSystemCompactionCrashHelper(dir, scenario string) {
+	store, err := Open(dir)
+	if err != nil {
+		crashHelperFailure(fmt.Sprintf("open system compaction crash directory: %v", err))
+	}
+	switch scenario {
+	case "system-checkpoint-sync":
+		installCrashAfterFilesystem(filesystemSync, ".metadata-", false, 0)
+	case "system-suffix-directory-sync":
+		installCrashAfterFilesystem(filesystemSync, generationPartitionDir(dir, 1, true), true, 1)
+	case "system-generation-manifest-rename":
+		installCrashAfterFilesystem(filesystemRename, filepath.Join(metadataGenerationsDir, "00000000000000000001", generationManifestName), false, 0)
+	case "system-active-manifest-rename":
+		installCrashAfterFilesystem(filesystemRename, filepath.Join(metadataRootDir, activeManifestName), false, 0)
+	case "system-active-manifest-directory-sync":
+		installCrashAfterFilesystem(filesystemSync, metadataRoot(dir), true, 1)
+	case "system-old-authority-cleanup":
+		installCrashAfterFilesystem(filesystemRemove, filepath.FromSlash(clusterMetadataDir), false, 0)
+	}
+	if err := store.CompactSystemLogs(context.Background()); err != nil {
+		crashHelperFailure(fmt.Sprintf("system compaction crash boundary: %v", err))
+	}
+	crashHelperFailure("system compaction crash boundary was not reached")
+}
+
 func runRetentionCrashHelper(dir, scenario string) {
 	store, err := Open(dir)
 	if err != nil {
@@ -274,7 +307,7 @@ func installCrashAfterFilesystem(operation filesystemOperation, path string, exa
 		if exact {
 			actualPath = canonicalFaultPath(actual)
 		}
-		matches := path == "" || exact && crashPathsMatch(path, actualPath) || !exact && strings.Contains(actual, path)
+		matches := path == "" || exact && crashPathsMatch(path, actualPath) || !exact && strings.Contains(filepath.ToSlash(actual), filepath.ToSlash(path))
 		if !matches || skip > 0 {
 			if matches {
 				skip--
@@ -333,6 +366,14 @@ func installCrashAfterFilesystem(operation filesystemOperation, path string, exa
 			}
 			return err
 		}
+	case filesystemRemove:
+		faulted.remove = func(path string) error {
+			err := base.remove(path)
+			if err == nil {
+				crash(path)
+			}
+			return err
+		}
 	case filesystemTruncate:
 		faulted.truncate = func(file *os.File, size int64) error {
 			err := base.truncate(file, size)
@@ -374,6 +415,22 @@ func setupInitializedStore(t *testing.T) string {
 	dir := t.TempDir()
 	store, err := Open(dir)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func setupSystemCompaction(t *testing.T) string {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateTopic("boundary-topic", 1, PartitionOptions{}); err != nil {
+		_ = store.Close()
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {

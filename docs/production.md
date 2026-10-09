@@ -89,6 +89,24 @@ safeguards. Lowering a limit on reopen does not delete existing durable state;
 it may instead refuse new growth or opening work until a larger operating
 profile is selected.
 
+The catalog and consumer-offset budgets limit new bytes in their active logs.
+They do not delete metadata automatically. Call `CompactSystemLogs` before
+headroom reaches zero to publish a complete authoritative checkpoint and fresh
+absolute-offset suffixes:
+
+```go
+if err := store.CompactSystemLogs(ctx); err != nil {
+	return err
+}
+```
+
+Compaction serializes metadata mutations and needs enough protected disk and
+inode capacity for the new checkpoints, manifests, and suffix headers to
+coexist with the old authority. An error matching
+`ErrMetadataOutcomeUnknown` or `ErrCommitOutcomeUnknown` fences further
+metadata work; close and reopen the store to resolve which manifest is durable.
+Do not remove old generation files manually.
+
 `MaxOpenSegmentFiles` bounds descriptors held for sealed (immutable) segments
 across the whole store; each open partition separately keeps one writer handle
 for its active segment. A partition's log length does not otherwise bound
@@ -202,6 +220,7 @@ its delivered records.
 - lifecycle phase and close timing;
 - open partitions and active assignments;
 - catalog and offsets history headroom;
+- system-log maintenance generation, outcome, reclaimed bytes, and cleanup debt;
 - tail-cache use;
 - append outcomes and rejection classes;
 - write, file-sync, and namespace-sync latency histograms;

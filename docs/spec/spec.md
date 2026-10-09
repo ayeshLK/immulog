@@ -306,6 +306,22 @@ system/consumer-offsets/0/
   [*.index]
   [*.timeindex]
   [projection.snapshot]
+system/metadata/
+  active-manifest
+  generations/<20-zero-padded-generation>/
+    manifest
+    cluster-metadata/0/
+      checkpoint
+      <20-zero-padded-absolute-offset>.log
+      [*.index]
+      [*.timeindex]
+      [projection.snapshot]
+    consumer-offsets/0/
+      checkpoint
+      <20-zero-padded-absolute-offset>.log
+      [*.index]
+      [*.timeindex]
+      [projection.snapshot]
 topics/<32-lowercase-hex-topic-id>/<decimal-partition>/
   <20-zero-padded-decimal-base>.log
   [<20-zero-padded-decimal-base>.index]
@@ -317,6 +333,11 @@ Square brackets denote optional/rebuildable files except the preparation
 marker, which is an internal crash-safety artifact and may exist during
 reconciliation. Unexpected authoritative files or catalog/storage disagreement
 MUST be treated conservatively as described in section 17.
+
+The two legacy system-log paths are authoritative when `active-manifest` is
+absent. When it exists, it selects exactly one authoritative metadata
+generation and both legacy logs cease to be authority. Generation numbers and
+suffix segment bases use exactly 20 zero-padded decimal digits.
 
 Segment filenames are the segment base offset as exactly 20 zero-padded decimal
 digits plus `.log`. Sidecars use the same stem. Partition directory names are
@@ -794,6 +815,17 @@ event that would exceed its budget returns `ErrSystemLogCapacity`. Lowering a
 budget below existing complete history does not itself make recovery invalid,
 but no new event can be admitted until a sufficiently larger budget is used.
 
+For a checkpointed generation, the budget applies to the active suffix log,
+not to the checkpoint containing the retired prefix projection. A successful
+`CompactSystemLogs` starts each suffix at its checkpoint's covered absolute
+offset and thereby restores logical append headroom. The checkpoint itself is
+bounded by the 256 MiB checkpoint-file limit and 1,048,576-entry limit.
+
+Compaction requires temporary byte and inode capacity for both checkpoints,
+two fresh suffix segments, and two manifests while the prior authority still
+exists. It uses protected control admission and fails before publication when
+that temporary capacity cannot be reserved.
+
 ### 12.3 Disk-pressure ledger
 
 All appends reserve estimated bytes and inodes against one store-wide ledger.
@@ -1251,6 +1283,89 @@ match the selected projected position, and `next >= expectedPrevious`. The
 instance, generation, member owner, and topic key MUST match the current
 assignment.
 
+### 15.9 Authoritative system-log generations
+
+`CompactSystemLogs` checkpoints the catalog and offsets projections at their
+current next offsets and creates empty suffix partitions whose initial offsets
+are those same absolute values. Revisions, group generations, committed
+positions, and record offsets MUST NOT be renumbered or reused.
+
+The authority switch is one `system/metadata/active-manifest` file. The active
+manifest and the selected generation's `manifest` MUST be byte-identical. A
+committed manifest selects both logs atomically; recovery MUST NOT combine a
+catalog checkpoint or suffix from one generation with offsets state from
+another. Missing or corrupt selected generation data is authoritative
+corruption and MUST NOT fall back to the legacy layout or an older generation.
+
+#### 15.9.1 Checkpoint file
+
+A checkpoint is a 104-byte header followed by its payload:
+
+| Offset | Bytes | Field |
+|---:|---:|---|
+| 0 | 8 | ASCII `IELCKP00` |
+| 8 | 2 | checkpoint schema version `1` |
+| 10 | 2 | header bytes `104` |
+| 12 | 2 | kind: 1 catalog, 2 offsets |
+| 14 | 2 | reserved zero, validated |
+| 16 | 8 | nonzero metadata generation |
+| 24 | 16 | store ID |
+| 40 | 8 | covered absolute next offset |
+| 48 | 8 | payload bytes |
+| 56 | 8 | bounded entry count |
+| 64 | 32 | SHA-256 payload digest |
+| 96 | 4 | reserved zero, validated |
+| 100 | 4 | CRC32C of bytes `[0,100)` |
+
+The payload uses the existing snapshot-payload ceiling of 268,435,296 bytes,
+and entry count is at most 1,048,576. The catalog payload contains the complete
+current topic and partition projection plus every retired artifact still owed
+physical cleanup.
+The offsets payload contains every group creation policy, current assignment
+body and fencing tokens, explicit starts, baselines, and committed positions.
+The checkpoint header's covered offset is the recovered projection revision.
+
+#### 15.9.2 Manifest
+
+Each manifest is exactly 256 bytes:
+
+| Offset | Bytes | Field |
+|---:|---:|---|
+| 0 | 8 | ASCII `IELMNF00` |
+| 8 | 2 | manifest schema version `1` |
+| 10 | 2 | bytes `256` |
+| 12 | 4 | reserved zero, validated |
+| 16 | 8 | nonzero generation |
+| 24 | 16 | store ID |
+| 40 | 8 | catalog covered next offset |
+| 48 | 8 | offsets covered next offset |
+| 56 | 32 | SHA-256 complete catalog checkpoint |
+| 88 | 32 | SHA-256 complete offsets checkpoint |
+| 120 | 48 | catalog suffix initial anchor |
+| 168 | 48 | offsets suffix initial anchor |
+| 216 | 36 | reserved zero, validated |
+| 252 | 4 | CRC32C of bytes `[0,252)` |
+
+Both checkpoint digests, both nonzero suffix anchors, generation, store ID,
+and coverage offsets MUST match the selected files. Catalog coverage is
+nonzero because every store contains `StoreInitialized`; offsets coverage may
+be zero.
+
+#### 15.9.3 Publication and cleanup
+
+Compaction serializes with retention, snapshot publication, shutdown, and all
+catalog/offset mutations. It MUST fully write and synchronize both
+checkpoints, fresh suffix headers, generation directories, and the generation
+manifest before atomically publishing and parent-directory-synchronizing the
+active manifest. Before that publication point the old authority remains
+selected. After it, the new generation is selected.
+
+If active-manifest publication has an unknown outcome, both metadata mutation
+classes MUST be fenced until reopen resolves the durable authority. Obsolete
+authority may be removed only after successful publication and live handoff.
+Cleanup failure does not roll authority back and is exposed as bounded
+maintenance cleanup debt.
+
 ## 16. Rebuildable persistence formats
 
 Nothing in this section can create or remove authoritative records. A missing,
@@ -1402,6 +1517,12 @@ not from indexes, snapshots, filenames alone, or in-memory state. Before
 mutation, startup preflights the system logs and then every catalog-owned user
 partition against IDs, paths, initial/current retained anchors, continuity, and
 persisted policy.
+
+When an active metadata manifest exists, recovery first validates its selected
+generation, both checkpoints, checkpoint digests, suffix anchors, absolute
+offset continuity, and catalog/offset cross-references. It loads each complete
+checkpoint projection and replays only records from the covered absolute offset
+through the suffix durable end. An unpublished generation is never authority.
 
 Catalog and offsets replay require record offsets to be contiguous. Catalog
 must begin with exactly one `StoreInitialized`. Event store IDs, expected
@@ -1568,6 +1689,7 @@ OpenWithOptions(dir string, options StoreOptions) (*Store, error)
 (*Store).OpenConsumer(ctx context.Context, groupID string, topic TopicID, partition uint32, options ConsumerOptions) (*Consumer, error)
 (*Store).OpenConsumerGroup(ctx context.Context, groupID string, members []ConsumerGroupMember, options ConsumerGroupOptions) (*GroupConsumer, error)
 (*Store).RunRetention(ctx context.Context) error
+(*Store).CompactSystemLogs(ctx context.Context) error
 (*Store).SaveSnapshots() error
 (*Store).Stats() (StoreStats, error)
 (*Store).Close() error

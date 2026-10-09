@@ -37,6 +37,8 @@ and reopens with conservative recovery after a process restart.
   boundary.
 - Inspect append outcomes, lag, capacity, retention cleanup, and lifecycle state
   through bounded diagnostics.
+- Reclaim superseded catalog and consumer-offset history through an explicit,
+  crash-safe authoritative checkpoint operation without reusing revisions.
 
 ## What it is—and is not
 
