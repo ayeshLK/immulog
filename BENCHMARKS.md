@@ -13,6 +13,7 @@ portable throughput guarantees or release thresholds unless explicitly stated.
   - [Soak workloads](#soak-workloads)
   - [Environment and artifacts](#environment-and-artifacts)
 - [Recorded results](#recorded-results)
+  - [Sustained compaction soak — 2026-10-10](#sustained-compaction-soak--2026-10-10)
   - [Compaction soak stress — 2026-10-09](#compaction-soak-stress--2026-10-09)
   - [Microbenchmark smoke — 2026-10-09](#microbenchmark-smoke--2026-10-09)
   - [Microbenchmark qualification — 2026-10-01](#microbenchmark-qualification--2026-10-01)
@@ -302,6 +303,61 @@ limits; it is not a routine local smoke.
 The current evidence sets below are retained here. Older result records were
 removed because the benchmark and soak frameworks evolved; they should not be
 compared directly with these measurements.
+
+<!-- soak-evidence:commit=8b1ac41f2bf679aabe37a3a74bf5dc082ec4a0af,date=2026-10-10 -->
+
+### Sustained compaction soak — 2026-10-10
+
+This is a single sustained-profile run at a bounded offered rate with
+system-log compaction enabled. It is local stability evidence for the recorded
+load, not a maximum-capacity or release-qualification result.
+
+| Environment | Value |
+|---|---|
+| Run interval | 2026-10-10 00:08:10–00:30:11 (+05:30) |
+| Commit / branch | `8b1ac41f2bf679aabe37a3a74bf5dc082ec4a0af` / `main` |
+| Worktree status | Not captured |
+| Processor | Intel(R) Core(TM) i7-10510U CPU @ 1.80GHz |
+| CPU count | 8 logical CPUs |
+| Memory | Not captured |
+| OS / kernel | Linux `7.0.0-38-generic` |
+| Architecture | `amd64`, `GOAMD64=v1` |
+| Go | `1.26.2` |
+| Filesystem | ext4; 67% used at capture time |
+
+Configuration: one sustained-profile run, 20-minute configured duration,
+2-minute warmup, 5-minute reopen interval, seed `0x5eed5eed`, 200 records/s
+aggregate producer-rate target, 250ms sample interval, `--churn-interval 0`,
+and 500ms system-log compaction interval. Resource preflights were explicitly
+disabled (`minimum-free-bytes=0`, `minimum-open-files=0`) for this local run.
+The warmup elapsed 2m00.1s, the process exited with status 0, and the analyzer
+marked the report valid.
+
+| Run | Active measurement | Offered records/s | Acknowledged records/s | Backlog start → end (slope/s) | Delivery/commit lag avg/max | Max open files | Max HeapAlloc | Max RSS | Skipped stats / delivery / commit |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 19m58.6s | 199.86 | 199.86 | 0 → 0 (0.00) | 0/19; 0/22 | 69 | 25,580,456 B | 40,894,464 B | 8,476 / 15,415 / 367 |
+
+Lag values are records: average/max delivery followed by average/max commit.
+The run had zero overload calls, zero known rejections, zero assignment
+losses, and zero dropped samples. It recorded 7 unknown outcomes and 7
+cancellations during the run lifecycle.
+
+Compaction-specific observations were:
+
+| Run | Compaction interval | Completed | Generation | Reclaimed bytes | Pending files | Pending bytes | Scan truncated | Scan error | p50 | p95 | p99 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 500ms | 2,131 | 2,350 | 81,983,816 | 0 | 0 | false | false | 100ms | 100ms | 1s |
+
+Stable-topic oracles verified through their next offsets with no retention
+skips. Retained-topic oracles passed with expected retention accounting,
+including five retention skips on one retained partition. The run maintained
+flat sampled backlog and near-zero delivery/commit lag while reclaiming about
+78.2 MiB through repeated compaction. These results support local stability at
+the recorded 200 records/s offered load; they do not establish a capacity
+ceiling or a portable throughput guarantee.
+
+Raw run artifacts and machine-readable analysis are retained outside the
+repository for reproducibility.
 
 <!-- soak-evidence:commit=8b1ac41f2bf679aabe37a3a74bf5dc082ec4a0af,date=2026-10-09 -->
 
