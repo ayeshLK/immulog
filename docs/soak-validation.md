@@ -22,6 +22,28 @@ operation which started before expiry does not lose its assignment while waiting
 for admission. They provide direct coverage of the fix without waiting for a
 multi-hour workload to reach the same state.
 
+For system-log compaction changes, run the compaction-aware smoke before a long
+integration soak:
+
+```sh
+perf/soak/run.sh \
+  --profile mixed \
+  --duration 20s \
+  --reopen-interval 5s \
+  --compaction-interval 1s \
+  --timeout 90s \
+  --run-dir /path/to/dedicated/compaction-smoke \
+  --minimum-free-bytes 0 \
+  --minimum-open-files 0 \
+  --analyze
+```
+
+Confirm that `metrics.json` reports at least one compaction, an advancing
+generation, no cleanup debt or scan error, and a populated
+`latency.system_compaction` histogram. This workload continues append, fetch,
+consumer commit, group churn, retention, and snapshot activity during
+compaction, then validates the selected generation on reopen.
+
 ## 2. Use a one-hour integration soak
 
 A one-hour sustained run is a sensible fast integration gate. With the default

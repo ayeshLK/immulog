@@ -21,6 +21,7 @@ Options:
       --sample-limit VALUE      Maximum retained samples (default: 100000)
       --analyze                 Write a Markdown summary beside metrics.json
   -c, --churn-interval VALUE    Membership replacement interval, or 0 to disable (default: 750ms)
+      --compaction-interval VALUE System-log compaction interval, or 0 to disable (default: 0)
   -t, --timeout VALUE            Go test timeout (default: auto)
   -f, --minimum-free-bytes VALUE Minimum free space or auto (default: auto, ~24 GiB for 4h)
   -n, --minimum-open-files VALUE Minimum open-file limit or auto (default: auto, ~65536 for 4h)
@@ -62,6 +63,7 @@ sample_limit=100000
 analyze=0
 rate_sweep=''
 churn_interval=750ms
+compaction_interval=0
 timeout=auto
 minimum_free_bytes=auto
 minimum_open_files=auto
@@ -149,6 +151,12 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--churn-interval=*) churn_interval=${1#*=}; shift ;;
+	--compaction-interval)
+		require_value "$@"
+		compaction_interval=$2
+		shift 2
+		;;
+	--compaction-interval=*) compaction_interval=${1#*=}; shift ;;
 	-t|--timeout)
 		require_value "$@"
 		timeout=$2
@@ -243,7 +251,7 @@ fi
 
 child_args() {
 	local child_dir=$1
-	child_args=(--run-dir "$child_dir" --profile "$profile" --duration "$duration" --warmup "$warmup" --runs 1 --timeout "$timeout" --seed "$seed" --reopen-interval "$reopen_interval" --append-interval "$append_interval" --churn-interval "$churn_interval" --sample-interval "$sample_interval" --sample-limit "$sample_limit" --minimum-free-bytes "$minimum_free_bytes" --minimum-open-files "$minimum_open_files")
+	child_args=(--run-dir "$child_dir" --profile "$profile" --duration "$duration" --warmup "$warmup" --runs 1 --timeout "$timeout" --seed "$seed" --reopen-interval "$reopen_interval" --append-interval "$append_interval" --churn-interval "$churn_interval" --compaction-interval "$compaction_interval" --sample-interval "$sample_interval" --sample-limit "$sample_limit" --minimum-free-bytes "$minimum_free_bytes" --minimum-open-files "$minimum_open_files")
 	if [[ -n "$producer_rate" ]]; then
 		child_args+=(--producer-rate "$producer_rate")
 	fi
@@ -289,7 +297,7 @@ if [[ -n "$rate_sweep" ]]; then
 			exit 2
 		fi
 		rate_dir="$run_root/rate-${sweep_rate//./_}"
-		args=(--run-dir "$rate_dir" --profile "$profile" --duration "$duration" --warmup "$warmup" --runs 1 --timeout "$timeout" --seed "$seed" --reopen-interval "$reopen_interval" --append-interval "$append_interval" --churn-interval "$churn_interval" --sample-interval "$sample_interval" --sample-limit "$sample_limit" --producer-rate "$sweep_rate" --minimum-free-bytes "$minimum_free_bytes" --minimum-open-files "$minimum_open_files")
+		args=(--run-dir "$rate_dir" --profile "$profile" --duration "$duration" --warmup "$warmup" --runs 1 --timeout "$timeout" --seed "$seed" --reopen-interval "$reopen_interval" --append-interval "$append_interval" --churn-interval "$churn_interval" --compaction-interval "$compaction_interval" --sample-interval "$sample_interval" --sample-limit "$sample_limit" --producer-rate "$sweep_rate" --minimum-free-bytes "$minimum_free_bytes" --minimum-open-files "$minimum_open_files")
 		if (( analyze )); then
 			args+=(--analyze)
 		fi
@@ -365,6 +373,18 @@ warmup_seconds=$(parse_duration_seconds "$warmup") || {
 	echo "warmup must use Go duration syntax, got $warmup" >&2
 	exit 2
 }
+if [[ "$compaction_interval" == 0 ]]; then
+	compaction_interval_seconds=0
+else
+	compaction_interval_seconds=$(parse_duration_seconds "$compaction_interval") || {
+		echo "compaction interval must use Go duration syntax or 0, got $compaction_interval" >&2
+		exit 2
+	}
+fi
+if (( compaction_interval_seconds < 0 )); then
+	echo "compaction interval must be nonnegative, got $compaction_interval" >&2
+	exit 2
+fi
 if (( warmup_seconds < 0 )); then
 	echo "warmup must be nonnegative, got $warmup" >&2
 	exit 2
@@ -424,6 +444,7 @@ fi
 	printf 'sample_interval=%s\n' "$sample_interval"
 	printf 'sample_limit=%s\n' "$sample_limit"
 	printf 'churn_interval=%s\n' "$churn_interval"
+	printf 'compaction_interval=%s\n' "$compaction_interval"
 	printf 'timeout=%s\n' "$timeout"
 	printf 'minimum_timeout_seconds=%s\n' "$minimum_timeout_seconds"
 	printf 'shutdown_grace_seconds=%s\n' "$shutdown_grace_seconds"
@@ -456,6 +477,7 @@ IMMULOG_SOAK_PRODUCER_RATE="${producer_rate:-0}" \
 IMMULOG_SOAK_SAMPLE_INTERVAL="$sample_interval" \
 IMMULOG_SOAK_SAMPLE_LIMIT="$sample_limit" \
 IMMULOG_SOAK_CHURN_INTERVAL="$churn_interval" \
+IMMULOG_SOAK_COMPACTION_INTERVAL="$compaction_interval" \
 IMMULOG_SOAK_METRICS_FILE="$metrics_file" \
 go test -v ./perf/soak -run '^TestMixedWorkloadSoak$' -count=1 -timeout="$timeout" 2>&1 | tee "$log_file"
 status=${PIPESTATUS[0]}
