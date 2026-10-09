@@ -330,6 +330,27 @@ IMMULOG_SOAK=1 IMMULOG_SOAK_DURATION=20s \
   go test ./perf/soak -run '^TestMixedWorkloadSoak$' -count=1 -timeout=90s
 ```
 
+To validate system-log maintenance under concurrent append, consumer commit,
+membership churn, retention, snapshot, and reopen activity, use the runner's
+opt-in compaction worker:
+
+```sh
+perf/soak/run.sh \
+  --profile mixed \
+  --duration 20s \
+  --reopen-interval 5s \
+  --compaction-interval 1s \
+  --timeout 90s \
+  --run-dir /path/to/dedicated/compaction-soak \
+  --minimum-free-bytes 0 \
+  --minimum-open-files 0
+```
+
+`IMMULOG_SOAK_COMPACTION_INTERVAL` is the corresponding direct-test setting;
+`0` disables compaction. The worker compacts immediately in each store cycle
+and periodically thereafter, and the run rejects generation discontinuity or
+system-authority cleanup debt.
+
 Record the filesystem, storage device, Go version, payload sizes, topic and
 partition counts, retention policy, operating limits, and observed diagnostics.
 Benchmark results are workload- and machine-specific evidence, not portable

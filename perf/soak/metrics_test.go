@@ -211,3 +211,52 @@ func TestSoakLatencyBucketsIncludeLongTails(t *testing.T) {
 		t.Fatalf("20s bucket upper bound = %d, want 30s", got)
 	}
 }
+
+func TestCompactSystemLogsOnceRecordsHealthyGeneration(t *testing.T) {
+	dir := t.TempDir()
+	store, fixture, err := openSoakStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := newSoakMetrics(time.Millisecond, 8)
+	if err := compactSystemLogsOnce(context.Background(), store, fixture, metrics); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if metrics.compaction.attempts.Load() != 1 || metrics.compaction.succeeded.Load() != 1 || metrics.compaction.generation.Load() != 1 {
+		t.Fatalf("compaction metrics = operations %d succeeded %d generation %d", metrics.compaction.attempts.Load(), metrics.compaction.succeeded.Load(), metrics.compaction.generation.Load())
+	}
+	if metrics.compaction.reclaimed.Load() == 0 {
+		t.Fatal("compaction did not record reclaimed authoritative bytes")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, reopenedFixture, err := openSoakStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	stats, err := reopened.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.SystemLogMaintenance.Generation != 1 {
+		t.Fatalf("reopened generation = %d, want 1", stats.SystemLogMaintenance.Generation)
+	}
+	if reopenedFixture.retained.ID != fixture.retained.ID || reopenedFixture.stable.ID != fixture.stable.ID {
+		t.Fatal("topic identity changed after compacted store reopen")
+	}
+}
+
+func TestSoakCompactionInterval(t *testing.T) {
+	t.Setenv("IMMULOG_SOAK_COMPACTION_INTERVAL", "250ms")
+	interval, err := soakCompactionInterval()
+	if err != nil || interval != 250*time.Millisecond {
+		t.Fatalf("compaction interval = (%s, %v)", interval, err)
+	}
+	t.Setenv("IMMULOG_SOAK_COMPACTION_INTERVAL", "-1s")
+	if _, err := soakCompactionInterval(); err == nil {
+		t.Fatal("negative compaction interval was accepted")
+	}
+}

@@ -165,6 +165,34 @@ perf/soak/run.sh \
   --analyze
 ```
 
+To exercise authoritative system-log compaction during metadata churn, enable
+the compaction worker explicitly. It compacts once at the start of every store
+cycle and then at the configured interval while producers, scanners, consumer
+commits, membership replacement, retention, and snapshots continue. Reopens
+validate the selected generation through the normal bootstrap path:
+
+```sh
+perf/soak/run.sh \
+  --run-dir "$HOME/immulog-soak/compaction-smoke" \
+  --profile mixed \
+  --duration 20s \
+  --reopen-interval 5s \
+  --compaction-interval 1s \
+  --timeout 90s \
+  --seed 0x5eed5eed \
+  --minimum-free-bytes 0 \
+  --minimum-open-files 0 \
+  --analyze
+```
+
+The run fails if a compaction does not advance exactly one generation, leaves
+cleanup debt, loses either soak topic projection, or prevents subsequent
+append, scan, delivery, commit, or reopen verification. `metrics.json` records
+the interval, completed compactions, latest generation, reclaimed bytes,
+cleanup diagnostics, and the `system_compaction` latency histogram. Leave
+`--compaction-interval 0` (the default) for results intended to remain directly
+comparable with earlier soak evidence.
+
 Short sustained-throughput smoke:
 
 ```sh

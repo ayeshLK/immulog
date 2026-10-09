@@ -185,6 +185,20 @@ type soakConsumerProgress struct {
 	lastCommitFinished [soakPartitionCount]atomic.Int64
 }
 
+type soakCompactionMetrics struct {
+	intervalNanos int64
+	attempts      atomic.Uint64
+	succeeded     atomic.Uint64
+	nanos         atomic.Uint64
+	buckets       [soakLatencyBucketCount]atomic.Uint64
+	generation    atomic.Uint64
+	reclaimed     atomic.Uint64
+	pendingFiles  atomic.Uint64
+	pendingBytes  atomic.Uint64
+	scanTruncated atomic.Bool
+	scanError     atomic.Bool
+}
+
 type soakMetrics struct {
 	stableTopic            api.TopicID
 	stableOffered          atomic.Uint64
@@ -238,6 +252,7 @@ type soakMetrics struct {
 	commitOps              atomic.Uint64
 	commitNanos            atomic.Uint64
 	commitBuckets          [soakLatencyBucketCount]atomic.Uint64
+	compaction             soakCompactionMetrics
 	verifyOps              atomic.Uint64
 	verifyNanos            atomic.Uint64
 	verifyBuckets          [soakLatencyBucketCount]atomic.Uint64
@@ -301,6 +316,10 @@ func TestMixedWorkloadSoak(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	compactionInterval, err := soakCompactionInterval()
+	if err != nil {
+		t.Fatal(err)
+	}
 	overloadPeriod, overloadWindow := time.Minute, 5*time.Second
 	stressCancellation := true
 	if profile == "sustained" {
@@ -338,6 +357,7 @@ func TestMixedWorkloadSoak(t *testing.T) {
 		t.Fatal(err)
 	}
 	metrics := newSoakMetrics(sampleInterval, sampleLimit)
+	metrics.compaction.intervalNanos = int64(compactionInterval)
 	metrics.stableTopic = fixture.stable.ID
 	metrics.warmupNanos = uint64(warmup)
 	var sequenceCounter atomic.Uint64
@@ -355,7 +375,7 @@ func TestMixedWorkloadSoak(t *testing.T) {
 		warmupElapsed, warmupErr := runWarmupCycles(warmup, reopenInterval, func(cycleBudget time.Duration) (time.Duration, error) {
 			cycleStarted := time.Now()
 			warmupContext, warmupCancel := context.WithTimeout(context.Background(), cycleBudget)
-			err := runSoakCycle(warmupContext, store, fixture, oracles, warmupMetrics, checkpoint.Run, seed, &sequenceCounter, appendInterval, producerRate, churnInterval, reopenInterval, overloadPeriod, overloadWindow, stressCancellation)
+			err := runSoakCycle(warmupContext, store, fixture, oracles, warmupMetrics, checkpoint.Run, seed, &sequenceCounter, appendInterval, producerRate, churnInterval, compactionInterval, reopenInterval, overloadPeriod, overloadWindow, stressCancellation)
 			warmupCancel()
 			if err != nil {
 				return time.Since(cycleStarted), err
@@ -368,6 +388,7 @@ func TestMixedWorkloadSoak(t *testing.T) {
 			t.Fatal(warmupErr)
 		}
 		metrics = newSoakMetrics(sampleInterval, sampleLimit)
+		metrics.compaction.intervalNanos = int64(compactionInterval)
 		metrics.stableTopic = fixture.stable.ID
 		metrics.warmupNanos = uint64(warmup)
 		metrics.warmupElapsedNanos = uint64(warmupElapsed)
@@ -401,7 +422,7 @@ func TestMixedWorkloadSoak(t *testing.T) {
 	soakContext, cancel := context.WithTimeout(context.Background(), duration)
 	defer cancel()
 	for {
-		if err := runSoakCycle(soakContext, store, fixture, oracles, metrics, checkpoint.Run, seed, &sequenceCounter, appendInterval, producerRate, churnInterval, reopenInterval, overloadPeriod, overloadWindow, stressCancellation); err != nil {
+		if err := runSoakCycle(soakContext, store, fixture, oracles, metrics, checkpoint.Run, seed, &sequenceCounter, appendInterval, producerRate, churnInterval, compactionInterval, reopenInterval, overloadPeriod, overloadWindow, stressCancellation); err != nil {
 			failure = err
 			t.Fatal(err)
 		}
@@ -424,6 +445,9 @@ func TestMixedWorkloadSoak(t *testing.T) {
 	}
 
 	metrics.finishMeasurement(time.Now())
+	if compactionInterval > 0 && metrics.compaction.succeeded.Load() == 0 {
+		t.Fatal("compaction-enabled soak completed without a system-log compaction")
+	}
 	for key, oracle := range oracles {
 		checkpoint.Partitions[key] = soakCheckpointPosition{Next: oracle.nextOffset()}
 	}
@@ -486,6 +510,17 @@ type soakPartitionReport struct {
 	MaxCommitLag          uint64  `json:"max_commit_lag"`
 }
 
+type soakCompactionReport struct {
+	IntervalNanos        uint64 `json:"interval_nanos"`
+	Completed            uint64 `json:"completed"`
+	Generation           uint64 `json:"generation"`
+	ReclaimedBytes       uint64 `json:"reclaimed_bytes"`
+	PendingCleanupFiles  uint64 `json:"pending_cleanup_files"`
+	PendingCleanupBytes  uint64 `json:"pending_cleanup_bytes"`
+	CleanupScanTruncated bool   `json:"cleanup_scan_truncated"`
+	CleanupScanError     bool   `json:"cleanup_scan_error"`
+}
+
 type soakMetricsReport struct {
 	Version               uint32                         `json:"version"`
 	Completed             bool                           `json:"completed"`
@@ -510,6 +545,7 @@ type soakMetricsReport struct {
 	KnownRejected         uint64                         `json:"known_rejected"`
 	Cancelled             uint64                         `json:"cancelled"`
 	OverloadCalls         uint64                         `json:"overload_calls"`
+	Compaction            soakCompactionReport           `json:"compaction"`
 	AcknowledgedBytes     uint64                         `json:"acknowledged_bytes"`
 	DeliveredBytes        uint64                         `json:"delivered_payload_bytes"`
 	MaxGoroutines         uint64                         `json:"max_goroutines"`
@@ -583,25 +619,35 @@ func writeSoakMetrics(path string, metrics *soakMetrics, oracles map[string]*soa
 		KnownRejected:         metrics.knownRejected.Load(),
 		Cancelled:             metrics.cancelled.Load(),
 		OverloadCalls:         metrics.overloadCalls.Load(),
-		AcknowledgedBytes:     metrics.acknowledgedBytes.Load(),
-		DeliveredBytes:        metrics.deliveredBytes.Load(),
-		MaxGoroutines:         metrics.maxGoroutines.Load(),
-		MaxOpenFiles:          metrics.maxOpenFiles.Load(),
-		MaxHeapBytes:          metrics.maxHeapBytes.Load(),
-		MaxRSSBytes:           metrics.maxRSSBytes.Load(),
-		GCycles:               metrics.gcCycles.Load(),
-		ProcessReadBytes:      metrics.processReadBytes.Load(),
-		ProcessWriteBytes:     metrics.processWriteBytes.Load(),
-		ProcessUserTicks:      metrics.processUserTicks.Load(),
-		ProcessSystemTicks:    metrics.processSystemTicks.Load(),
-		LagSamples:            lagSamples,
-		AverageDeliveryLag:    averageDeliveryLag,
-		MaxDeliveryLag:        metrics.maxDeliveryLag.Load(),
-		AverageCommitLag:      averageCommitLag,
-		MaxCommitLag:          metrics.maxCommitLag.Load(),
-		Latency:               make(map[string]soakLatencyReport),
-		Partitions:            make(map[string]soakPartitionReport, soakPartitionCount),
-		Oracles:               make(map[string]soakOracleReport, len(oracles)),
+		Compaction: soakCompactionReport{
+			IntervalNanos:        uint64(metrics.compaction.intervalNanos),
+			Completed:            metrics.compaction.succeeded.Load(),
+			Generation:           metrics.compaction.generation.Load(),
+			ReclaimedBytes:       metrics.compaction.reclaimed.Load(),
+			PendingCleanupFiles:  metrics.compaction.pendingFiles.Load(),
+			PendingCleanupBytes:  metrics.compaction.pendingBytes.Load(),
+			CleanupScanTruncated: metrics.compaction.scanTruncated.Load(),
+			CleanupScanError:     metrics.compaction.scanError.Load(),
+		},
+		AcknowledgedBytes:  metrics.acknowledgedBytes.Load(),
+		DeliveredBytes:     metrics.deliveredBytes.Load(),
+		MaxGoroutines:      metrics.maxGoroutines.Load(),
+		MaxOpenFiles:       metrics.maxOpenFiles.Load(),
+		MaxHeapBytes:       metrics.maxHeapBytes.Load(),
+		MaxRSSBytes:        metrics.maxRSSBytes.Load(),
+		GCycles:            metrics.gcCycles.Load(),
+		ProcessReadBytes:   metrics.processReadBytes.Load(),
+		ProcessWriteBytes:  metrics.processWriteBytes.Load(),
+		ProcessUserTicks:   metrics.processUserTicks.Load(),
+		ProcessSystemTicks: metrics.processSystemTicks.Load(),
+		LagSamples:         lagSamples,
+		AverageDeliveryLag: averageDeliveryLag,
+		MaxDeliveryLag:     metrics.maxDeliveryLag.Load(),
+		AverageCommitLag:   averageCommitLag,
+		MaxCommitLag:       metrics.maxCommitLag.Load(),
+		Latency:            make(map[string]soakLatencyReport),
+		Partitions:         make(map[string]soakPartitionReport, soakPartitionCount),
+		Oracles:            make(map[string]soakOracleReport, len(oracles)),
 	}
 	latencies := []struct {
 		name       string
@@ -612,6 +658,7 @@ func writeSoakMetrics(path string, metrics *soakMetrics, oracles map[string]*soa
 		{"append", &metrics.appendOps, &metrics.appendNanos, &metrics.appendBuckets},
 		{"poll", &metrics.pollOps, &metrics.pollNanos, &metrics.pollBuckets},
 		{"commit", &metrics.commitOps, &metrics.commitNanos, &metrics.commitBuckets},
+		{"system_compaction", &metrics.compaction.attempts, &metrics.compaction.nanos, &metrics.compaction.buckets},
 		{"verify", &metrics.verifyOps, &metrics.verifyNanos, &metrics.verifyBuckets},
 		{"offer_to_scan", &metrics.offerToScanOps, &metrics.offerToScanNanos, &metrics.offerToScanBuckets},
 		{"ack_to_scan", &metrics.ackToScanOps, &metrics.ackToScanNanos, &metrics.ackToScanBuckets},
@@ -767,6 +814,18 @@ func soakChurnInterval() (time.Duration, error) {
 	interval, err := time.ParseDuration(value)
 	if err != nil || interval < 0 {
 		return 0, fmt.Errorf("IMMULOG_SOAK_CHURN_INTERVAL must be nonnegative, got %q", value)
+	}
+	return interval, nil
+}
+
+func soakCompactionInterval() (time.Duration, error) {
+	value := os.Getenv("IMMULOG_SOAK_COMPACTION_INTERVAL")
+	if value == "" {
+		return 0, nil
+	}
+	interval, err := time.ParseDuration(value)
+	if err != nil || interval < 0 {
+		return 0, fmt.Errorf("IMMULOG_SOAK_COMPACTION_INTERVAL must be nonnegative, got %q", value)
 	}
 	return interval, nil
 }
@@ -966,7 +1025,7 @@ func runWarmupCycles(warmup, reopenInterval time.Duration, runCycle func(time.Du
 	return elapsed, nil
 }
 
-func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixture, oracles map[string]*soakOracle, metrics *soakMetrics, run, seed uint64, sequenceCounter *atomic.Uint64, appendInterval time.Duration, producerRate float64, churnInterval, reopenInterval, overloadPeriod, overloadWindow time.Duration, stressCancellation bool) error {
+func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixture, oracles map[string]*soakOracle, metrics *soakMetrics, run, seed uint64, sequenceCounter *atomic.Uint64, appendInterval time.Duration, producerRate float64, churnInterval, compactionInterval, reopenInterval, overloadPeriod, overloadWindow time.Duration, stressCancellation bool) error {
 	members := soakGroupMembers(fixture.stable.ID, false)
 	consumer, err := store.OpenConsumerGroup(parent, "soak-workers", members, soakGroupOptions())
 	if err != nil {
@@ -1027,6 +1086,13 @@ func runSoakCycle(parent context.Context, store *storage.Store, fixture soakFixt
 		go func() {
 			defer workerWait.Done()
 			churnLoop(cycleContext, store, handle, fixture.stable.ID, churnInterval, report)
+		}()
+	}
+	if compactionInterval != 0 {
+		workerWait.Add(1)
+		go func() {
+			defer workerWait.Done()
+			compactionLoop(cycleContext, store, fixture, compactionInterval, metrics, report)
 		}()
 	}
 	workerWait.Add(1)
@@ -1503,6 +1569,73 @@ func maintenanceLoop(ctx context.Context, store *storage.Store, report func(erro
 			return
 		}
 	}
+}
+
+func compactionLoop(ctx context.Context, store *storage.Store, fixture soakFixture, interval time.Duration, metrics *soakMetrics, report func(error)) {
+	for {
+		if err := compactSystemLogsOnce(ctx, store, fixture, metrics); err != nil {
+			if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, api.ErrClosing) || errors.Is(err, api.ErrClosed)) {
+				return
+			}
+			report(err)
+			return
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		}
+	}
+}
+
+func compactSystemLogsOnce(ctx context.Context, store *storage.Store, fixture soakFixture, metrics *soakMetrics) error {
+	before, err := store.Stats()
+	if err != nil {
+		return fmt.Errorf("read pre-compaction soak stats: %w", err)
+	}
+	started := time.Now()
+	err = store.CompactSystemLogs(ctx)
+	recordSoakLatency(&metrics.compaction.attempts, &metrics.compaction.nanos, &metrics.compaction.buckets, time.Since(started))
+	if err != nil {
+		return fmt.Errorf("compact soak system logs: %w", err)
+	}
+	after, err := store.Stats()
+	if err != nil {
+		return fmt.Errorf("read post-compaction soak stats: %w", err)
+	}
+	maintenance := after.SystemLogMaintenance
+	if maintenance.Generation != before.SystemLogMaintenance.Generation+1 {
+		return fmt.Errorf("system-log compaction generation advanced from %d to %d, want exactly one generation", before.SystemLogMaintenance.Generation, maintenance.Generation)
+	}
+	if maintenance.Running || maintenance.LastSuccess.IsZero() || maintenance.LastFailure != "" {
+		return fmt.Errorf("system-log compaction reported unhealthy maintenance state: %#v", maintenance)
+	}
+	if maintenance.PendingCleanupFiles != 0 || maintenance.PendingCleanupBytes != 0 || maintenance.CleanupScanTruncated || maintenance.CleanupScanError {
+		return fmt.Errorf("system-log compaction left cleanup debt: %#v", maintenance)
+	}
+	for _, expected := range []storage.TopicDescriptor{fixture.retained, fixture.stable} {
+		descriptor, describeErr := store.DescribeTopic(expected.Name)
+		if describeErr != nil {
+			return fmt.Errorf("describe topic %q after system-log compaction: %w", expected.Name, describeErr)
+		}
+		if descriptor.ID != expected.ID || len(descriptor.Partitions) != len(expected.Partitions) {
+			return fmt.Errorf("topic %q changed identity after system-log compaction", expected.Name)
+		}
+	}
+	if maintenance.ReclaimedBytes < before.SystemLogMaintenance.ReclaimedBytes {
+		return fmt.Errorf("system-log reclaimed bytes decreased from %d to %d", before.SystemLogMaintenance.ReclaimedBytes, maintenance.ReclaimedBytes)
+	}
+	reclaimed := maintenance.ReclaimedBytes - before.SystemLogMaintenance.ReclaimedBytes
+	metrics.compaction.reclaimed.Add(reclaimed)
+	metrics.compaction.succeeded.Add(1)
+	metrics.compaction.generation.Store(maintenance.Generation)
+	metrics.compaction.pendingFiles.Store(uint64(maintenance.PendingCleanupFiles))
+	metrics.compaction.pendingBytes.Store(maintenance.PendingCleanupBytes)
+	metrics.compaction.scanTruncated.Store(maintenance.CleanupScanTruncated)
+	metrics.compaction.scanError.Store(maintenance.CleanupScanError)
+	return nil
 }
 
 func statsLoop(ctx context.Context, store *storage.Store, handle *soakGroupHandle, topic api.TopicID, metrics *soakMetrics, report func(error)) {
@@ -2188,13 +2321,14 @@ func (metrics *soakMetrics) summary() string {
 		metrics.latencySummary("append", &metrics.appendOps, &metrics.appendNanos, &metrics.appendBuckets),
 		metrics.latencySummary("poll", &metrics.pollOps, &metrics.pollNanos, &metrics.pollBuckets),
 		metrics.latencySummary("commit", &metrics.commitOps, &metrics.commitNanos, &metrics.commitBuckets),
+		metrics.latencySummary("system_compaction", &metrics.compaction.attempts, &metrics.compaction.nanos, &metrics.compaction.buckets),
 		metrics.latencySummary("verify", &metrics.verifyOps, &metrics.verifyNanos, &metrics.verifyBuckets),
 		metrics.latencySummary("offer_to_scan", &metrics.offerToScanOps, &metrics.offerToScanNanos, &metrics.offerToScanBuckets),
 		metrics.latencySummary("ack_to_scan", &metrics.ackToScanOps, &metrics.ackToScanNanos, &metrics.ackToScanBuckets),
 		metrics.latencySummary("offer_to_delivery", &metrics.offerToDeliveryOps, &metrics.offerToDeliveryNanos, &metrics.offerToDeliveryBuckets),
 		metrics.latencySummary("ack_to_delivery", &metrics.ackToDeliveryOps, &metrics.ackToDeliveryNanos, &metrics.ackToDeliveryBuckets),
 	}
-	return fmt.Sprintf("offered=%d acknowledged=%d unknown=%d known_rejected=%d cancelled=%d overload_calls=%d acknowledged_bytes=%d delivered_payload_bytes=%d max_goroutines=%d max_open_files=%d max_heap_bytes=%d max_rss_bytes=%d gc_cycles=%d process_read_bytes=%d process_write_bytes=%d process_user_ticks=%d process_system_ticks=%d lag_samples=%d average_delivery_lag=%d max_delivery_lag=%d average_commit_lag=%d max_commit_lag=%d %s", metrics.offered.Load(), metrics.acknowledged.Load(), metrics.unknown.Load(), metrics.knownRejected.Load(), metrics.cancelled.Load(), metrics.overloadCalls.Load(), metrics.acknowledgedBytes.Load(), metrics.deliveredBytes.Load(), metrics.maxGoroutines.Load(), metrics.maxOpenFiles.Load(), metrics.maxHeapBytes.Load(), metrics.maxRSSBytes.Load(), metrics.gcCycles.Load(), metrics.processReadBytes.Load(), metrics.processWriteBytes.Load(), metrics.processUserTicks.Load(), metrics.processSystemTicks.Load(), lagSamples, averageDeliveryLag, metrics.maxDeliveryLag.Load(), averageCommitLag, metrics.maxCommitLag.Load(), strings.Join(latencies, " "))
+	return fmt.Sprintf("offered=%d acknowledged=%d unknown=%d known_rejected=%d cancelled=%d overload_calls=%d compactions=%d compaction_generation=%d compaction_reclaimed_bytes=%d compaction_pending_cleanup_files=%d compaction_pending_cleanup_bytes=%d acknowledged_bytes=%d delivered_payload_bytes=%d max_goroutines=%d max_open_files=%d max_heap_bytes=%d max_rss_bytes=%d gc_cycles=%d process_read_bytes=%d process_write_bytes=%d process_user_ticks=%d process_system_ticks=%d lag_samples=%d average_delivery_lag=%d max_delivery_lag=%d average_commit_lag=%d max_commit_lag=%d %s", metrics.offered.Load(), metrics.acknowledged.Load(), metrics.unknown.Load(), metrics.knownRejected.Load(), metrics.cancelled.Load(), metrics.overloadCalls.Load(), metrics.compaction.succeeded.Load(), metrics.compaction.generation.Load(), metrics.compaction.reclaimed.Load(), metrics.compaction.pendingFiles.Load(), metrics.compaction.pendingBytes.Load(), metrics.acknowledgedBytes.Load(), metrics.deliveredBytes.Load(), metrics.maxGoroutines.Load(), metrics.maxOpenFiles.Load(), metrics.maxHeapBytes.Load(), metrics.maxRSSBytes.Load(), metrics.gcCycles.Load(), metrics.processReadBytes.Load(), metrics.processWriteBytes.Load(), metrics.processUserTicks.Load(), metrics.processSystemTicks.Load(), lagSamples, averageDeliveryLag, metrics.maxDeliveryLag.Load(), averageCommitLag, metrics.maxCommitLag.Load(), strings.Join(latencies, " "))
 }
 
 func (metrics *soakMetrics) latencySummary(name string, operations, nanos *atomic.Uint64, buckets *[soakLatencyBucketCount]atomic.Uint64) string {

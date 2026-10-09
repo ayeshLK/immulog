@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAnalyzeReportUsesMeasurementSamples(t *testing.T) {
@@ -58,6 +59,32 @@ func TestAnalyzeReportUsesMeasurementSamples(t *testing.T) {
 	}
 	if !strings.Contains(renderMarkdown([]analysis{result}), "10.0s") {
 		t.Fatal("markdown omitted measurement duration")
+	}
+}
+
+func TestAnalyzeReportsCompactionEvidence(t *testing.T) {
+	result := analyze("fixture", rawReport{
+		Version: 2, MeasurementNanos: uint64(time.Second),
+		Compaction: compactionSummary{IntervalNanos: uint64(time.Second), Completed: 3, Generation: 4, ReclaimedBytes: 1024},
+		Latency:    map[string]rawLatency{"system_compaction": {Operations: 3, P50: uint64(100 * time.Millisecond), P95: uint64(time.Second), P99: uint64(time.Second)}},
+		Oracles:    map[string]json.RawMessage{"stable": {}},
+	})
+	if !result.Valid || result.Compaction.Completed != 3 || result.Compaction.Generation != 4 {
+		t.Fatalf("compaction analysis = %#v", result)
+	}
+	markdown := renderMarkdown([]analysis{result})
+	if !strings.Contains(markdown, "Compaction interval") || !strings.Contains(markdown, "100ms") {
+		t.Fatalf("compaction markdown omitted evidence:\n%s", markdown)
+	}
+}
+
+func TestAnalyzeRejectsMissingCompactionEvidence(t *testing.T) {
+	result := analyze("fixture", rawReport{
+		Version: 2, MeasurementNanos: uint64(time.Second), Compaction: compactionSummary{IntervalNanos: uint64(time.Second)},
+		Oracles: map[string]json.RawMessage{"stable": {}},
+	})
+	if result.Valid || !strings.Contains(strings.Join(result.Reasons, "; "), "no compaction completed") {
+		t.Fatalf("missing compaction evidence = %#v", result)
 	}
 }
 

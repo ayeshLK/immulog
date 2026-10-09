@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 type inputPaths []string
@@ -49,11 +50,23 @@ type rawSample struct {
 }
 
 type rawLatency struct {
-	P50  uint64 `json:"p50_bucket_nanos"`
-	P90  uint64 `json:"p90_bucket_nanos"`
-	P95  uint64 `json:"p95_bucket_nanos"`
-	P99  uint64 `json:"p99_bucket_nanos"`
-	P999 uint64 `json:"p999_bucket_nanos"`
+	Operations uint64 `json:"operations"`
+	P50        uint64 `json:"p50_bucket_nanos"`
+	P90        uint64 `json:"p90_bucket_nanos"`
+	P95        uint64 `json:"p95_bucket_nanos"`
+	P99        uint64 `json:"p99_bucket_nanos"`
+	P999       uint64 `json:"p999_bucket_nanos"`
+}
+
+type compactionSummary struct {
+	IntervalNanos        uint64 `json:"interval_nanos"`
+	Completed            uint64 `json:"completed"`
+	Generation           uint64 `json:"generation"`
+	ReclaimedBytes       uint64 `json:"reclaimed_bytes"`
+	PendingCleanupFiles  uint64 `json:"pending_cleanup_files"`
+	PendingCleanupBytes  uint64 `json:"pending_cleanup_bytes"`
+	CleanupScanTruncated bool   `json:"cleanup_scan_truncated"`
+	CleanupScanError     bool   `json:"cleanup_scan_error"`
 }
 
 type rawReport struct {
@@ -73,6 +86,7 @@ type rawReport struct {
 	Acknowledged          uint64                     `json:"acknowledged"`
 	Unknown               uint64                     `json:"unknown"`
 	KnownRejected         uint64                     `json:"known_rejected"`
+	Compaction            compactionSummary          `json:"compaction"`
 	DeliveredBytes        uint64                     `json:"delivered_payload_bytes"`
 	AckBytes              uint64                     `json:"acknowledged_bytes"`
 	Samples               []rawSample                `json:"samples"`
@@ -107,6 +121,7 @@ type analysis struct {
 	Acknowledged          uint64                    `json:"acknowledged"`
 	Unknown               uint64                    `json:"unknown"`
 	KnownRejected         uint64                    `json:"known_rejected"`
+	Compaction            compactionSummary         `json:"compaction"`
 	BacklogStart          uint64                    `json:"backlog_start"`
 	BacklogEnd            uint64                    `json:"backlog_end"`
 	BacklogMax            uint64                    `json:"backlog_max"`
@@ -160,6 +175,7 @@ func analyze(path string, report rawReport) analysis {
 		DeliveredBytesS:    float64(report.DeliveredBytes) / seconds,
 		Offered:            report.Offered, Acknowledged: report.Acknowledged, Unknown: report.Unknown,
 		KnownRejected: report.KnownRejected, Samples: uint64(len(report.Samples)),
+		Compaction:     report.Compaction,
 		SamplesDropped: report.SamplesDropped, ConsumerStatsSkipped: report.ConsumerStatsSkipped,
 		OracleDeliverySkipped: report.OracleDeliverySkipped, OracleCommitSkipped: report.OracleCommitSkipped,
 		Latency: make(map[string]latencySummary), Valid: true,
@@ -216,6 +232,20 @@ func analyze(path string, report rawReport) analysis {
 		result.Valid = false
 		result.Reasons = append(result.Reasons, "oracle results are missing")
 	}
+	if report.Compaction.IntervalNanos > 0 {
+		if report.Compaction.Completed == 0 {
+			result.Valid = false
+			result.Reasons = append(result.Reasons, "compaction was enabled but no compaction completed")
+		}
+		if report.Compaction.PendingCleanupFiles != 0 || report.Compaction.PendingCleanupBytes != 0 || report.Compaction.CleanupScanTruncated || report.Compaction.CleanupScanError {
+			result.Valid = false
+			result.Reasons = append(result.Reasons, "system-log compaction left cleanup debt or incomplete diagnostics")
+		}
+		if latency, exists := report.Latency["system_compaction"]; !exists || latency.Operations < report.Compaction.Completed {
+			result.Valid = false
+			result.Reasons = append(result.Reasons, "system-log compaction latency evidence is missing")
+		}
+	}
 	return result
 }
 
@@ -243,7 +273,29 @@ func renderMarkdown(results []analysis) string {
 			builder.WriteString(fmt.Sprintf("\n- `%s`: %s\n", result.Input, reason))
 		}
 	}
+	compactionResults := false
+	for _, result := range results {
+		compactionResults = compactionResults || result.Compaction.IntervalNanos > 0
+	}
+	if compactionResults {
+		builder.WriteString("\n| Run | Compaction interval | Completed | Generation | Reclaimed bytes | Pending files | Pending bytes | Scan truncated | Scan error | p50 | p95 | p99 |\n")
+		builder.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+		for _, result := range results {
+			if result.Compaction.IntervalNanos == 0 {
+				continue
+			}
+			latency := result.Latency["system_compaction"]
+			builder.WriteString(fmt.Sprintf("| `%s` | %s | %d | %d | %d | %d | %d | %t | %t | %s | %s | %s |\n", result.Input, time.Duration(result.Compaction.IntervalNanos), result.Compaction.Completed, result.Compaction.Generation, result.Compaction.ReclaimedBytes, result.Compaction.PendingCleanupFiles, result.Compaction.PendingCleanupBytes, result.Compaction.CleanupScanTruncated, result.Compaction.CleanupScanError, formatLatencyBucket(latency.P50Nanos), formatLatencyBucket(latency.P95Nanos), formatLatencyBucket(latency.P99Nanos)))
+		}
+	}
 	return builder.String()
+}
+
+func formatLatencyBucket(value *uint64) string {
+	if value == nil {
+		return ">1m"
+	}
+	return time.Duration(*value).String()
 }
 
 func main() {
