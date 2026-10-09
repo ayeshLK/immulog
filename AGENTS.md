@@ -10,9 +10,8 @@ and long-running soak harnesses live under `perf/`. `README.md` describes the
 current scope, `docs/spec/spec.md` is the normative behavioral and persistence
 contract, `BENCHMARKS.md` is the source of truth for performance methodology
 and dated evidence, and `PROGRESS.md` records the local implementation
-checkpoint. Keep future metadata, consumer, retention, and ingress work within
-the planned package boundaries; do not add network or replication code to this
-slice.
+checkpoint. Keep changes within the existing package boundaries; do not add
+network or replication code to this local single-process slice.
 
 The `Store` owns the canonical directory, stable `LOCK`, catalog and consumer
 offset system partitions, user partitions, retention, snapshots, and disk
@@ -76,9 +75,9 @@ limits, snapshots, indexes, and tails are bounded and rebuildable where noted.
 
 This is a single Go module supporting Go 1.25 and Go 1.26 using the standard
 Go toolchain; there is no separate build system or lint configuration. Linux
-is the only currently
-qualified platform because locking and disk-pressure implementations are
-Linux-specific.
+is the only currently qualified durability platform. Native macOS and Windows
+jobs provide build/test coverage, but their filesystem durability qualification
+is pending; see `docs/durability-qualification.md`.
 
 Run these from the repository root:
 
@@ -104,6 +103,7 @@ go test ./storage -run '^$' -fuzz=FuzzDecodeSegmentHeader -fuzztime=60m -paralle
 go test ./storage -run '^$' -fuzz=FuzzPreflightSystemLogSegment -fuzztime=60m -parallel=1
 perf/benchmarks/run.sh --profile smoke
 perf/soak/run.sh --profile mixed --duration 20s --timeout 90s --minimum-free-bytes 0 --minimum-open-files 0
+perf/soak/run.sh --profile mixed --duration 20s --timeout 90s --compaction-interval 500ms --minimum-free-bytes 0 --minimum-open-files 0
 ```
 
 There is no separate build script; `go test ./...` compiles all packages.
@@ -114,7 +114,8 @@ disabled unless `IMMULOG_SOAK=1`; use `IMMULOG_SOAK_DIR`
 for a dedicated persistent directory. `IMMULOG_SOAK_DURATION`, `IMMULOG_SOAK_WARMUP`,
 `IMMULOG_SOAK_REOPEN_INTERVAL`, `IMMULOG_SOAK_APPEND_INTERVAL`,
 `IMMULOG_SOAK_PRODUCER_RATE`, `IMMULOG_SOAK_SAMPLE_INTERVAL`,
-`IMMULOG_SOAK_SAMPLE_LIMIT`, `IMMULOG_SOAK_CHURN_INTERVAL`, and
+`IMMULOG_SOAK_SAMPLE_LIMIT`, `IMMULOG_SOAK_CHURN_INTERVAL`,
+`IMMULOG_SOAK_COMPACTION_INTERVAL`, `IMMULOG_SOAK_METRICS_FILE`, and
 `IMMULOG_SOAK_SEED` control resumable runs. A nonzero producer rate applies a
 monotonic aggregate records-per-second schedule; zero preserves unlimited
 producer mode. The runner's `--churn-interval 0` setting disables deliberate
@@ -178,6 +179,18 @@ the measured elapsed warmup including reopen/verification. The analyzer marks
 reports invalid when elapsed warmup is missing or shorter than configured.
 Sustained evidence with positive backlog growth or assignment loss is not a
 stable capacity result.
+
+### Durability qualification
+
+`docs/durability-qualification.md` is the source of truth for platform
+qualification status and evidence boundaries. The current Linux baseline on
+merged `main` passed shuffled storage tests, race-enabled storage tests, ten
+repetitions of the process-crash/persistence-boundary suite, all-package tests,
+and vet. This validates deterministic fault injection and abrupt process
+termination on Linux/ext4; it does not prove physical power-loss behavior.
+Native macOS and Windows durability qualification remains incomplete. Preserve
+the tested commit, host/filesystem assumptions, exact commands, exit statuses,
+and raw artifacts outside the repository for future qualification runs.
 
 ## Coding Style & Naming Conventions
 
@@ -251,9 +264,10 @@ Go 1.25 and Go 1.26, source copyright-header checks, formatting, module-tidy, ve
 tests, race tests, and package coverage. Fuzzing and performance evidence are
 manual workflows; use `BENCHMARKS.md` for performance commands, environment
 capture, and interpretation; use the opt-in soak settings documented above
-instead of running the soak in ordinary CI. Linux is the only currently qualified
-platform, so do not add a cross-platform matrix without equivalent lock and
-disk-pressure implementations.
+instead of running the soak in ordinary CI. Linux is the only currently
+qualified durability platform. Native macOS and Windows CI are build/test
+checks, not durability qualification; do not expand platform claims without
+the matrix and evidence requirements in `docs/durability-qualification.md`.
 
 All third-party GitHub Actions must be pinned to full commit SHAs and workflows
 must retain least-privilege permissions. Release preparation and publication are
