@@ -258,8 +258,10 @@ After a process crash or an unknown persistence outcome:
 5. resume only after the store and affected partitions are available.
 
 The qualification suite models process termination and injected filesystem
-failures. It does not prove behavior for every torn write or power-loss mode;
-validate the target filesystem and device separately.
+failures. The current platform status and evidence boundaries are recorded in
+the [durability qualification matrix](durability-qualification.md). It does
+not prove behavior for every torn write or power-loss mode; validate the target
+filesystem and device separately.
 
 ## Backups and file handling
 
