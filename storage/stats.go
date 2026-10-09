@@ -55,6 +55,22 @@ type StoreStats struct {
 	RetentionRunning        bool
 	DiskPressure            DiskPressureStats
 	Cleanup                 CleanupStats
+	SystemLogMaintenance    SystemLogMaintenanceStats
+}
+
+// SystemLogMaintenanceStats is a bounded summary of authoritative system-log
+// generation maintenance. LastFailure is capped and contains no history.
+type SystemLogMaintenanceStats struct {
+	Running              bool
+	Generation           uint64
+	LastAttempt          time.Time
+	LastSuccess          time.Time
+	LastFailure          string
+	ReclaimedBytes       uint64
+	PendingCleanupFiles  uint32
+	PendingCleanupBytes  uint64
+	CleanupScanTruncated bool
+	CleanupScanError     bool
 }
 
 // CleanupStats describes retired artifacts that still need physical cleanup.
@@ -149,12 +165,19 @@ func (store *Store) Stats() (StoreStats, error) {
 	activeConsumers := uint32(len(store.consumers))
 	activeGroupConsumers := uint32(len(store.groupConsumers))
 	tailBudget := store.tailBudget
+	systemMaintenance := store.systemMaintenance
 	store.mu.Unlock()
 	stats := lifecycle
 	stats.OpenPartitions = openPartitions
 	stats.ActiveConsumers = activeConsumers
 	stats.ActiveGroupConsumers = activeGroupConsumers
 	stats.Cleanup = store.cleanupStats()
+	stats.SystemLogMaintenance = systemMaintenance
+	pendingFiles, pendingBytes, truncated, scanError := scanSystemAuthorityCleanup(store.rootPath, systemMaintenance.Generation)
+	stats.SystemLogMaintenance.PendingCleanupFiles = pendingFiles
+	stats.SystemLogMaintenance.PendingCleanupBytes = pendingBytes
+	stats.SystemLogMaintenance.CleanupScanTruncated = truncated
+	stats.SystemLogMaintenance.CleanupScanError = scanError
 	stats.RetentionRunning = store.retentionStarted.Load() && !store.retentionStopped.Load()
 	stats.DiskPressure = store.disk.snapshot()
 	stats.Catalog = partitionStats(catalog)

@@ -291,12 +291,29 @@ System logs are not user-retained, and offsets are never reused. See the
 [production guide](production.md#retention-and-disk-capacity) for capacity and
 cleanup behavior.
 
+Catalog and consumer-offset histories can be compacted explicitly after they
+accumulate superseded control events:
+
+```go
+if err := store.CompactSystemLogs(ctx); err != nil {
+	return err
+}
+```
+
+The operation publishes one authoritative generation for both system logs,
+preserves their absolute revisions and consumer fencing state, and starts new
+suffix logs at the checkpointed revisions. It needs temporary disk and inode
+headroom while the old authority still exists. Monitor
+`StoreStats.SystemLogMaintenance` and compact before either history budget is
+exhausted. The operation is explicit; no background compactor runs.
+
 ## Snapshots and diagnostics
 
 `SaveSnapshots` publishes replaceable projection caches for the catalog and
 consumer offsets. Snapshots can speed startup but are not authoritative and
-are not a backup format; the durable system logs remain the recovery source of
-truth.
+are not a backup format. Legacy system logs, or a manifest-selected
+checkpoint and its suffix logs after `CompactSystemLogs`, remain the recovery
+source of truth.
 
 Publication cost does not grow with the length of a system log, and the
 snapshot file write and sync run outside the store lock, so calling it

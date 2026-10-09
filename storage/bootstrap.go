@@ -30,9 +30,13 @@ type metadataBootstrap struct {
 	projection          *catalogProjection
 	offsetsState        *offsetsProjection
 	snapshotDiagnostics SnapshotDiagnostics
+	generation          uint64
 }
 
 func bootstrapMetadata(rootPath string, fallback StoreID, limits StoreOptions) (*metadataBootstrap, error) {
+	if compacted, found, err := bootstrapCompactedMetadata(rootPath, limits); found || err != nil {
+		return compacted, err
+	}
 	catalogDir := filepath.Join(rootPath, clusterMetadataDir)
 	offsetsDir := filepath.Join(rootPath, consumerOffsetsDir)
 	if err := fsMkdirAll(catalogDir, 0o755); err != nil {
