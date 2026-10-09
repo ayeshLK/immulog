@@ -208,8 +208,8 @@ func TestCompactSystemLogsPublicationFailuresFenceUntilReopen(t *testing.T) {
 	}{
 		{
 			name: "active-manifest-rename",
-			arm: func(plan *filesystemFaultPlan, dir string) {
-				plan.failOnce(filesystemRename, "-> "+filepath.Join(metadataRoot(dir), activeManifestName), errors.New("injected active manifest rename failure"))
+			arm: func(plan *filesystemFaultPlan, _ string) {
+				plan.failOnce(filesystemRename, filepath.Join(metadataRootDir, activeManifestName), errors.New("injected active manifest rename failure"))
 			},
 		},
 		{
@@ -228,6 +228,7 @@ func TestCompactSystemLogsPublicationFailuresFenceUntilReopen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer store.Close()
 			if _, err := store.CreateTopic("before-fault", 1, PartitionOptions{}); err != nil {
 				t.Fatal(err)
 			}
@@ -266,7 +267,7 @@ func TestCompactSystemLogsFailureBeforeAuthoritySwitchKeepsLegacyWritable(t *tes
 		t.Fatal(err)
 	}
 	defer store.Close()
-	plan.failOnce(filesystemRename, "-> "+filepath.Join(generationRoot(dir, 1), generationManifestName), errors.New("injected generation manifest failure"))
+	plan.failOnce(filesystemRename, filepath.Join(metadataGenerationsDir, "00000000000000000001", generationManifestName), errors.New("injected generation manifest failure"))
 	if err := store.CompactSystemLogs(context.Background()); err == nil || errors.Is(err, api.ErrMetadataOutcomeUnknown) || errors.Is(err, api.ErrCommitOutcomeUnknown) {
 		t.Fatalf("pre-switch compaction error = %v, want known failure", err)
 	}
@@ -348,7 +349,8 @@ func TestCompactSystemLogsReportsAndRetriesCleanupDebt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan.failOnce(filesystemRemove, clusterMetadataDir, errors.New("injected old catalog cleanup failure"))
+	defer func() { _ = store.Close() }()
+	plan.failOnce(filesystemRemove, filepath.FromSlash(clusterMetadataDir), errors.New("injected old catalog cleanup failure"))
 	if err := store.CompactSystemLogs(context.Background()); err == nil {
 		t.Fatal("compaction unexpectedly hid cleanup failure")
 	}

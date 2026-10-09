@@ -232,13 +232,13 @@ func runSystemCompactionCrashHelper(dir, scenario string) {
 	case "system-suffix-directory-sync":
 		installCrashAfterFilesystem(filesystemSync, generationPartitionDir(dir, 1, true), true, 1)
 	case "system-generation-manifest-rename":
-		installCrashAfterFilesystem(filesystemRename, "-> "+filepath.Join(generationRoot(dir, 1), generationManifestName), false, 0)
+		installCrashAfterFilesystem(filesystemRename, filepath.Join(metadataGenerationsDir, "00000000000000000001", generationManifestName), false, 0)
 	case "system-active-manifest-rename":
-		installCrashAfterFilesystem(filesystemRename, "-> "+filepath.Join(metadataRoot(dir), activeManifestName), false, 0)
+		installCrashAfterFilesystem(filesystemRename, filepath.Join(metadataRootDir, activeManifestName), false, 0)
 	case "system-active-manifest-directory-sync":
 		installCrashAfterFilesystem(filesystemSync, metadataRoot(dir), true, 1)
 	case "system-old-authority-cleanup":
-		installCrashAfterFilesystem(filesystemRemove, clusterMetadataDir, false, 0)
+		installCrashAfterFilesystem(filesystemRemove, filepath.FromSlash(clusterMetadataDir), false, 0)
 	}
 	if err := store.CompactSystemLogs(context.Background()); err != nil {
 		crashHelperFailure(fmt.Sprintf("system compaction crash boundary: %v", err))
@@ -307,7 +307,7 @@ func installCrashAfterFilesystem(operation filesystemOperation, path string, exa
 		if exact {
 			actualPath = canonicalFaultPath(actual)
 		}
-		matches := path == "" || exact && crashPathsMatch(path, actualPath) || !exact && strings.Contains(actual, path)
+		matches := path == "" || exact && crashPathsMatch(path, actualPath) || !exact && strings.Contains(filepath.ToSlash(actual), filepath.ToSlash(path))
 		if !matches || skip > 0 {
 			if matches {
 				skip--
