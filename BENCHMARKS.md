@@ -13,6 +13,7 @@ portable throughput guarantees or release thresholds unless explicitly stated.
   - [Soak workloads](#soak-workloads)
   - [Environment and artifacts](#environment-and-artifacts)
 - [Recorded results](#recorded-results)
+  - [Microbenchmark smoke — 2026-10-09](#microbenchmark-smoke--2026-10-09)
   - [Microbenchmark qualification — 2026-10-01](#microbenchmark-qualification--2026-10-01)
   - [Sustained soak — 2026-10-01](#sustained-soak--2026-10-01)
   - [Microbenchmark qualification — 2026-09-29](#microbenchmark-qualification--2026-09-29)
@@ -301,6 +302,106 @@ The current evidence sets below are retained here. Older result records were
 removed because the benchmark and soak frameworks evolved; they should not be
 compared directly with these measurements.
 
+<!-- microbenchmark-evidence:commit=576a319ad13fc263cfaa9f44ebb0fb58734b7012,date=2026-10-09 -->
+
+### Microbenchmark smoke — 2026-10-09
+
+Configuration: `smoke` profile, `all` suite, 1 second per sample, 3 samples
+per process run, 1 independent run, and `-cpu 1` (3 samples per benchmark).
+The full suite completed successfully.
+
+| Environment | Value |
+|---|---|
+| Run start | 2026-10-09 22:38:10 (+05:30) |
+| Commit / branch | `576a319ad13fc263cfaa9f44ebb0fb58734b7012` / `main` |
+| Worktree status | Clean; runner used `allow_dirty=0` |
+| Processor | Intel(R) Core(TM) i7-10510U CPU @ 1.80GHz |
+| CPU count | 8 logical CPUs; benchmarks ran with `-cpu 1` |
+| Memory | Not captured |
+| OS / kernel | Linux `7.0.0-38-generic` |
+| Architecture | `amd64`, `GOAMD64=v1` |
+| Go | `1.26.2` |
+| Filesystem | ext4; 67% used at capture time |
+
+This is a smoke run with 1-second samples and three samples per benchmark. It
+is useful for post-merge sanity checking, but is not directly comparable with
+the 2026-10-01 qualification entry, which used 10-second samples, ten samples
+per process, and three independent runs.
+
+Values are medians across all captured samples; P10–P90 shows ns/op variability.
+
+| Benchmark | Samples | Median ns/op | P10–P90 ns/op | CV | Median records/s | Median MB/s | Median B/op | Median allocs/op |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `BenchmarkDirectAppendBatch/records-1/payload-1024` | 3 | 1436160 | 1420995–1436750 | 0.6% | 696 | 0.71 | 29862 | 8 |
+| `BenchmarkDirectAppendBatch/records-1/payload-256` | 3 | 1407153 | 1390261–1413922 | 0.9% | 711 | 0.18 | 26543 | 8 |
+| `BenchmarkDirectAppendBatch/records-1/payload-4096` | 3 | 1485014 | 1480976–1502416 | 0.8% | 673 | 2.76 | 43833 | 8 |
+| `BenchmarkDirectAppendBatch/records-256/payload-1024` | 3 | 3493924 | 3463346–3609454 | 2.2% | 73270 | 75.03 | 2154714 | 536 |
+| `BenchmarkDirectAppendBatch/records-256/payload-256` | 3 | 2160026 | 2135074–2167344 | 0.8% | 118517 | 30.34 | 704083 | 535 |
+| `BenchmarkDirectAppendBatch/records-256/payload-4096` | 3 | 7641863 | 7234525–8011245 | 5.2% | 33500 | 137.21 | 9388109 | 539 |
+| `BenchmarkDirectAppendBatch/records-64/payload-1024` | 3 | 2050239 | 2037936–2098260 | 1.6% | 31216 | 31.97 | 543766 | 146 |
+| `BenchmarkDirectAppendBatch/records-64/payload-256` | 3 | 1651103 | 1647874–1655124 | 0.2% | 38762 | 9.92 | 181495 | 146 |
+| `BenchmarkDirectAppendBatch/records-64/payload-4096` | 3 | 3537239 | 3524924–3592546 | 1.0% | 18093 | 74.11 | 2232841 | 148 |
+| `BenchmarkDirectAppendBatch/records-8/payload-1024` | 3 | 1554181 | 1542828–1560699 | 0.6% | 5147 | 5.27 | 83090 | 27 |
+| `BenchmarkDirectAppendBatch/records-8/payload-256` | 3 | 1478620 | 1470331–1483305 | 0.5% | 5410 | 1.39 | 42180 | 27 |
+| `BenchmarkDirectAppendBatch/records-8/payload-4096` | 3 | 1783970 | 1747051–1820335 | 2.1% | 4484 | 18.37 | 296640 | 28 |
+| `BenchmarkFetch/segment` | 3 | 81991 | 80785–83164 | 1.5% | 1561152 | 399.65 | 193891 | 258 |
+| `BenchmarkFetch/tail` | 3 | 29373 | 24740–30323 | 11.0% | 4357756 | 1115.59 | 49152 | 129 |
+| `BenchmarkFetchParallel` | 3 | 94794 | 92479–97027 | 2.4% | 1350290 | 345.67 | 193916 | 258 |
+| `BenchmarkIngressAppend` | 3 | 1447827 | 1441096–1464003 | 0.8% | 691 | 0.18 | 27836 | 18 |
+| `BenchmarkIngressAppendParallel/producers-1/payload-1024` | 3 | 1480840 | 1474913–1578713 | 3.9% | 675 | 0.69 | 33100 | 19 |
+| `BenchmarkIngressAppendParallel/producers-1/payload-256` | 3 | 1449211 | 1437204–1451534 | 0.5% | 690 | 0.18 | 30172 | 19 |
+| `BenchmarkIngressAppendParallel/producers-1/payload-4096` | 3 | 2654532 | 1760221–8434876 | 78.8% | 377 | 1.54 | 50528 | 19 |
+| `BenchmarkIngressAppendParallel/producers-1/payload-64` | 3 | 1437588 | 1428650–1444482 | 0.6% | 696 | 0.04 | 29085 | 19 |
+| `BenchmarkIngressAppendParallel/producers-16/payload-1024` | 3 | 194118 | 191886–196620 | 1.2% | 5152 | 5.28 | 12520 | 12 |
+| `BenchmarkIngressAppendParallel/producers-16/payload-256` | 3 | 186886 | 185610–187629 | 0.6% | 5351 | 1.37 | 6772 | 12 |
+| `BenchmarkIngressAppendParallel/producers-16/payload-4096` | 3 | 221721 | 220825–222138 | 0.3% | 4510 | 18.47 | 36468 | 12 |
+| `BenchmarkIngressAppendParallel/producers-16/payload-64` | 3 | 181276 | 180668–182744 | 0.6% | 5516 | 0.35 | 5044 | 12 |
+| `BenchmarkIngressAppendParallel/producers-2/payload-1024` | 3 | 1445681 | 1431551–1448779 | 0.7% | 692 | 0.71 | 33861 | 18 |
+| `BenchmarkIngressAppendParallel/producers-2/payload-256` | 3 | 1440171 | 1418027–1754939 | 12.3% | 694 | 0.18 | 30717 | 19 |
+| `BenchmarkIngressAppendParallel/producers-2/payload-4096` | 3 | 1506862 | 1490844–1529892 | 1.3% | 664 | 2.72 | 51422 | 19 |
+| `BenchmarkIngressAppendParallel/producers-2/payload-64` | 3 | 2313681 | 1937558–8622180 | 80.1% | 432 | 0.03 | 29447 | 19 |
+| `BenchmarkIngressAppendParallel/producers-32/payload-1024` | 3 | 102862 | 100778–103962 | 1.6% | 9722 | 9.96 | 12367 | 11 |
+| `BenchmarkIngressAppendParallel/producers-32/payload-256` | 3 | 94369 | 94223–94652 | 0.2% | 10597 | 2.71 | 5260 | 11 |
+| `BenchmarkIngressAppendParallel/producers-32/payload-4096` | 3 | 132139 | 131840–135062 | 1.4% | 7568 | 31.00 | 38936 | 11 |
+| `BenchmarkIngressAppendParallel/producers-32/payload-64` | 3 | 193220 | 115178–328146 | 50.7% | 5175 | 0.33 | 3293 | 11 |
+| `BenchmarkIngressAppendParallel/producers-4/payload-1024` | 3 | 748107 | 736303–750049 | 1.0% | 1337 | 1.37 | 21540 | 16 |
+| `BenchmarkIngressAppendParallel/producers-4/payload-256` | 3 | 722081 | 721845–727222 | 0.4% | 1385 | 0.35 | 16535 | 16 |
+| `BenchmarkIngressAppendParallel/producers-4/payload-4096` | 3 | 787028 | 782042–789346 | 0.5% | 1271 | 5.20 | 41163 | 16 |
+| `BenchmarkIngressAppendParallel/producers-4/payload-64` | 3 | 721360 | 717059–721870 | 0.4% | 1386 | 0.09 | 15907 | 16 |
+| `BenchmarkIngressAppendParallel/producers-64/payload-1024` | 3 | 56044 | 55663–56066 | 0.4% | 17843 | 18.27 | 11324 | 11 |
+| `BenchmarkIngressAppendParallel/producers-64/payload-256` | 3 | 48910 | 48798–49440 | 0.7% | 20446 | 5.23 | 4657 | 11 |
+| `BenchmarkIngressAppendParallel/producers-64/payload-4096` | 3 | 87419 | 87155–89088 | 1.2% | 11439 | 46.85 | 40092 | 11 |
+| `BenchmarkIngressAppendParallel/producers-64/payload-64` | 3 | 46667 | 46629–46760 | 0.1% | 21428 | 1.37 | 2787 | 11 |
+| `BenchmarkIngressAppendParallel/producers-8/payload-1024` | 3 | 377275 | 376323–377461 | 0.2% | 2651 | 2.71 | 16120 | 14 |
+| `BenchmarkIngressAppendParallel/producers-8/payload-256` | 3 | 363633 | 361686–366449 | 0.7% | 2750 | 0.70 | 9853 | 13 |
+| `BenchmarkIngressAppendParallel/producers-8/payload-4096` | 3 | 416062 | 414328–425680 | 1.5% | 2403 | 9.84 | 39569 | 14 |
+| `BenchmarkIngressAppendParallel/producers-8/payload-64` | 3 | 361391 | 358529–362317 | 0.6% | 2767 | 0.18 | 8432 | 13 |
+| `BenchmarkIngressBatchLinger/producers-32/linger-0s` | 3 | 156977 | 155831–193068 | 12.6% | 6370 | 6.52 | 11876 | 11 |
+| `BenchmarkIngressBatchLinger/producers-32/linger-100µs` | 3 | 109948 | 109437–131595 | 10.9% | 9095 | 9.31 | 11245 | 11 |
+| `BenchmarkIngressBatchLinger/producers-32/linger-1ms` | 3 | 115778 | 114773–119821 | 2.3% | 8637 | 8.84 | 11156 | 11 |
+| `BenchmarkIngressBatchLinger/producers-32/linger-5ms` | 3 | 237626 | 236971–242822 | 1.4% | 4208 | 4.31 | 11036 | 11 |
+| `BenchmarkIngressBatchLinger/producers-64/linger-0s` | 3 | 56103 | 55565–56662 | 1.0% | 17824 | 18.25 | 11152 | 11 |
+| `BenchmarkIngressBatchLinger/producers-64/linger-100µs` | 3 | 48387 | 47344–49204 | 2.0% | 20667 | 21.16 | 10896 | 11 |
+| `BenchmarkIngressBatchLinger/producers-64/linger-1ms` | 3 | 54939 | 54832–55136 | 0.3% | 18202 | 18.64 | 10601 | 11 |
+| `BenchmarkIngressBatchLinger/producers-64/linger-5ms` | 3 | 128682 | 124328–174387 | 19.4% | 7771 | 7.96 | 10499 | 11 |
+| `BenchmarkIngressBatchLinger/producers-8/linger-0s` | 3 | 430196 | 385514–1019171 | 54.9% | 2325 | 2.38 | 15500 | 14 |
+| `BenchmarkIngressBatchLinger/producers-8/linger-100µs` | 3 | 340335 | 337549–341463 | 0.6% | 2938 | 3.01 | 11663 | 13 |
+| `BenchmarkIngressBatchLinger/producers-8/linger-1ms` | 3 | 349564 | 344015–369842 | 3.9% | 2861 | 2.93 | 11533 | 13 |
+| `BenchmarkIngressBatchLinger/producers-8/linger-5ms` | 3 | 913254 | 912140–977855 | 4.1% | 1095 | 1.12 | 10644 | 13 |
+
+Variance notes:
+
+- BenchmarkFetch/tail has 11.0% coefficient of variation for ns/op.
+- BenchmarkIngressAppendParallel/producers-1/payload-4096 has 78.8% coefficient of variation for ns/op.
+- BenchmarkIngressAppendParallel/producers-2/payload-256 has 12.3% coefficient of variation for ns/op.
+- BenchmarkIngressAppendParallel/producers-2/payload-64 has 80.1% coefficient of variation for ns/op.
+- BenchmarkIngressAppendParallel/producers-32/payload-64 has 50.7% coefficient of variation for ns/op.
+- BenchmarkIngressBatchLinger/producers-32/linger-0s has 12.6% coefficient of variation for ns/op.
+- BenchmarkIngressBatchLinger/producers-32/linger-100µs has 10.9% coefficient of variation for ns/op.
+- BenchmarkIngressBatchLinger/producers-64/linger-5ms has 19.4% coefficient of variation for ns/op.
+- BenchmarkIngressBatchLinger/producers-8/linger-0s has 54.9% coefficient of variation for ns/op.
+
+The raw run artifacts and machine-readable analysis are preserved in the benchmark run directory. This is host-specific evidence, not a portable throughput guarantee.
 <!-- microbenchmark-evidence:commit=f8e42e909c1774cc3198060c4639aa1b76a4ff6c,date=2026-10-01 -->
 
 ### Microbenchmark qualification — 2026-10-01
