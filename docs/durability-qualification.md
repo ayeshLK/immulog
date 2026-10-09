@@ -10,8 +10,8 @@ injection test does not reproduce every power-loss or device failure mode.
 | Platform / filesystem | Native build and test CI | Deterministic storage faults | Process-crash recovery | Power-loss / torn-device experiment | Deployment status |
 |---|---|---|---|---|---|
 | Linux / ext4 | Covered by the core Linux jobs, including race and shuffled tests | Covered in `storage` through filesystem seams | Covered by `TestProcessCrashRecovery` and `TestPersistenceBoundaryCrashRecovery` | Not independently reproduced on a real device; sync semantics are assumed to be honored | Qualified only for the documented Linux contract and an honoring storage device |
-| macOS / native filesystem | Covered by native macOS CI | Test coverage exists where the filesystem seam is portable | Native qualification evidence not yet recorded | Not tested | Build/test coverage only; not a qualified durability target |
-| Windows / native filesystem | Covered by native Windows CI | Test coverage exists where the filesystem seam is portable | Native qualification evidence not yet recorded | Not tested | Build/test coverage only; not a qualified durability target |
+| macOS / native filesystem | Covered by native macOS CI | Test coverage exists where the filesystem seam is portable | **Not completed**; native qualification evidence pending | Not tested | Build/test coverage only; not a qualified durability target |
+| Windows / native filesystem | Covered by native Windows CI | Test coverage exists where the filesystem seam is portable | **Not completed**; native qualification evidence pending | Not tested | Build/test coverage only; not a qualified durability target |
 
 The Linux status matches the normative specification: Linux is the only
 currently qualified runtime. macOS and Windows CI demonstrate build and test
@@ -42,6 +42,10 @@ termination on Linux/ext4. It does not reproduce physical power loss,
 controller write-cache failure, or every torn-write mode on a real device; the
 Linux qualification claim remains conditional on a storage device honoring the
 required write and synchronization operations.
+
+Native macOS and Windows durability qualification is **not completed**. Their
+CI jobs remain build/test coverage only; Docker-based Linux containers are not
+substitutes for native filesystem and kernel evidence on those platforms.
 
 ## Existing deterministic coverage
 
