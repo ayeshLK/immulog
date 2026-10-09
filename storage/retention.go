@@ -531,9 +531,27 @@ func (store *Store) runRetentionLoop(stop <-chan struct{}, wake <-chan struct{},
 			}
 			continue
 		case <-timer.C:
-			_ = store.RunRetention(context.Background())
+			store.runBackgroundRetention()
 		}
 	}
+}
+
+func (store *Store) runBackgroundRetention() {
+	store.mu.Lock()
+	store.retentionMaintenance.Running = true
+	store.retentionMaintenance.LastAttempt = time.Now()
+	store.mu.Unlock()
+
+	err := store.RunRetention(context.Background())
+	store.mu.Lock()
+	store.retentionMaintenance.Running = false
+	if err != nil {
+		store.retentionMaintenance.LastFailure = boundedDiagnosticError(err)
+	} else {
+		store.retentionMaintenance.LastSuccess = time.Now()
+		store.retentionMaintenance.LastFailure = ""
+	}
+	store.mu.Unlock()
 }
 
 func (store *Store) retentionCheckInterval() time.Duration {

@@ -69,22 +69,23 @@ type Store struct {
 	// catalogAppend is a deterministic test seam for uncertain metadata writes.
 	catalogAppend func(api.RecordBatch) (uint64, error)
 	// offsetsAppend is a deterministic test seam for uncertain offsets writes.
-	offsetsAppend       func(api.RecordBatch) (uint64, error)
-	offsetsState        *offsetsProjection
-	consumers           map[string]*Consumer
-	groupConsumers      map[string]*GroupConsumer
-	expiredGroups       map[string]bool
-	offsetsAdmission    chan struct{}
-	offsetsUnavailable  bool
-	snapshotDiagnostics SnapshotDiagnostics
-	metadataGeneration  uint64
-	systemMaintenance   SystemLogMaintenanceStats
-	metadataUnavailable bool
-	closed              bool
-	openedAt            time.Time
-	closeStartedAt      time.Time
-	closeFinishedAt     time.Time
-	closeCause          string
+	offsetsAppend        func(api.RecordBatch) (uint64, error)
+	offsetsState         *offsetsProjection
+	consumers            map[string]*Consumer
+	groupConsumers       map[string]*GroupConsumer
+	expiredGroups        map[string]bool
+	offsetsAdmission     chan struct{}
+	offsetsUnavailable   bool
+	snapshotDiagnostics  SnapshotDiagnostics
+	metadataGeneration   uint64
+	systemMaintenance    SystemLogMaintenanceStats
+	retentionMaintenance RetentionMaintenanceStats
+	metadataUnavailable  bool
+	closed               bool
+	openedAt             time.Time
+	closeStartedAt       time.Time
+	closeFinishedAt      time.Time
+	closeCause           string
 }
 
 type partitionKey struct {

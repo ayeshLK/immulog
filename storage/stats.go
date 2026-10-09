@@ -53,9 +53,20 @@ type StoreStats struct {
 	Catalog                 PartitionStats
 	ConsumerOffsets         PartitionStats
 	RetentionRunning        bool
+	RetentionMaintenance    RetentionMaintenanceStats
 	DiskPressure            DiskPressureStats
 	Cleanup                 CleanupStats
 	SystemLogMaintenance    SystemLogMaintenanceStats
+}
+
+// RetentionMaintenanceStats is a bounded summary of the background retention
+// worker. LastFailure contains only the latest capped error and is cleared by
+// the next successful pass; no error history is retained.
+type RetentionMaintenanceStats struct {
+	Running     bool
+	LastAttempt time.Time
+	LastSuccess time.Time
+	LastFailure string
 }
 
 // SystemLogMaintenanceStats is a bounded summary of authoritative system-log
@@ -166,6 +177,7 @@ func (store *Store) Stats() (StoreStats, error) {
 	activeGroupConsumers := uint32(len(store.groupConsumers))
 	tailBudget := store.tailBudget
 	systemMaintenance := store.systemMaintenance
+	retentionMaintenance := store.retentionMaintenance
 	store.mu.Unlock()
 	stats := lifecycle
 	stats.OpenPartitions = openPartitions
@@ -173,12 +185,14 @@ func (store *Store) Stats() (StoreStats, error) {
 	stats.ActiveGroupConsumers = activeGroupConsumers
 	stats.Cleanup = store.cleanupStats()
 	stats.SystemLogMaintenance = systemMaintenance
+	stats.RetentionMaintenance = retentionMaintenance
 	pendingFiles, pendingBytes, truncated, scanError := scanSystemAuthorityCleanup(store.rootPath, systemMaintenance.Generation)
 	stats.SystemLogMaintenance.PendingCleanupFiles = pendingFiles
 	stats.SystemLogMaintenance.PendingCleanupBytes = pendingBytes
 	stats.SystemLogMaintenance.CleanupScanTruncated = truncated
 	stats.SystemLogMaintenance.CleanupScanError = scanError
 	stats.RetentionRunning = store.retentionStarted.Load() && !store.retentionStopped.Load()
+	stats.RetentionMaintenance.Running = stats.RetentionRunning && retentionMaintenance.Running
 	stats.DiskPressure = store.disk.snapshot()
 	stats.Catalog = partitionStats(catalog)
 	stats.ConsumerOffsets = partitionStats(offsets)

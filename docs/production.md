@@ -188,7 +188,13 @@ If application-owned partitions occupy every slot, `RunRetention` returns
 evicting an application handle. Leave maintenance headroom in that limit when
 retention must cover more partitions than the application keeps open. Treat
 `RunRetention` errors as operational evidence and inspect `Store.Stats` before
-trying to change policy.
+trying to change policy. The configured background worker reports its latest
+attempt through `StoreStats.RetentionMaintenance`: `LastFailure` is a bounded
+error string for the most recent failed pass, while `LastSuccess` records the
+most recent successful pass. A later successful pass clears `LastFailure`; the
+worker continues retrying after failures. `RetentionRunning` (and the
+`Running` field) only indicates that the worker is active, not that its latest
+pass succeeded.
 
 ## Operate consumers at least once
 
