@@ -10,6 +10,7 @@ portable throughput guarantees or release thresholds unless explicitly stated.
 - [Test types and measurement model](#test-types-and-measurement-model)
 - [Run the benchmarks](#run-the-benchmarks)
   - [Go microbenchmarks](#go-microbenchmarks)
+  - [History recovery](#history-recovery)
   - [Soak workloads](#soak-workloads)
   - [Environment and artifacts](#environment-and-artifacts)
 - [Recorded results](#recorded-results)
@@ -34,12 +35,13 @@ soaks exercise the integrated store over time, including consumer progress,
 reopen cycles, resource use, and independent correctness oracles. A passing
 run only supports claims about its recorded configuration.
 
-The repository currently has two performance test families:
+The repository currently has three performance test families:
 
 | Family | What it measures | Use it for | It does not establish |
 |---|---|---|---|
 | `perf/benchmarks` | Durable append and fetch paths with Go benchmark timing, allocations, and throughput | Short, repeatable comparisons of storage/API paths | Whole-system endurance or production capacity |
 | `perf/soak` | Integrated append/consumer workload, lag, resource trends, reopen behavior, and oracle verification | Long-run correctness, liveness, and stability under a selected offered load | A universal capacity figure or device-independent guarantee |
+| `perf/history` | Cold-open behavior across controlled user-segment, catalog, and consumer-offset histories | Recovery-scaling and snapshot/fallback comparisons | Steady-state throughput or a library memory bound |
 
 The microbenchmarks use normal filesystem-backed operations; they are not
 in-memory queue measurements. `mixed` soaks deliberately exercise cancellation,
@@ -142,6 +144,30 @@ Append benchmarks should validate the final durable end and report
 `consumer-records/s` and `consumer-bytes/s`. Use `b.SetBytes` for Go's standard
 bandwidth metric. Keep setup, reopen, retention, and verification outside
 steady-state throughput measurements.
+
+### History recovery
+
+Use the opt-in history runner to compare cold-open cost across controlled user
+segment and system-log histories. Repeated runs are isolated, and the evidence
+root records the effective configuration, exact commands, statuses, commit and
+worktree state, Go/host details, and filesystem metadata.
+
+```sh
+perf/history/run.sh \
+  --run-dir /tmp/immulog-history-$(date +%Y%m%d-%H%M%S) \
+  --records 10000,100000,1000000 \
+  --catalog-topics 100 \
+  --consumer-commits 1000 \
+  --runs 3 \
+  --snapshots
+```
+
+Baseline, valid-snapshot, and invalid-snapshot cases must use identical history
+dimensions. Snapshots accelerate catalog and consumer-offset projection replay;
+increasing only user records or segments does not by itself create a meaningful
+snapshot comparison. Treat heap and RSS as whole-process observations and use
+multiple runs rather than interpreting one cold-open sample as a qualification
+result. See `perf/history/README.md` for all controls and artifact semantics.
 
 ### Soak workloads
 

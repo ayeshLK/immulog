@@ -18,6 +18,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -41,6 +42,8 @@ type report struct {
 	Partitions          uint32 `json:"partitions"`
 	SegmentBytes        uint64 `json:"segment_bytes"`
 	BatchRecords        uint32 `json:"batch_records"`
+	CatalogTopics       uint32 `json:"catalog_topics"`
+	ConsumerCommits     uint64 `json:"consumer_commits"`
 	Snapshots           bool   `json:"snapshots"`
 	SnapshotInvalidated bool   `json:"snapshot_invalidated"`
 	Segments            uint64 `json:"segments"`
@@ -62,6 +65,8 @@ func main() {
 		partitions         uint
 		segmentBytes       uint64
 		batchRecords       uint
+		catalogTopics      uint
+		consumerCommits    uint64
 		withSnapshots      bool
 		invalidateSnapshot bool
 		output             string
@@ -71,12 +76,20 @@ func main() {
 	flag.UintVar(&partitions, "partitions", 1, "number of partitions")
 	flag.Uint64Var(&segmentBytes, "segment-bytes", 64<<10, "maximum segment size")
 	flag.UintVar(&batchRecords, "batch-records", 32, "records per append batch")
+	flag.UintVar(&catalogTopics, "catalog-topics", 1, "total catalog topics, including the data-bearing topic")
+	flag.Uint64Var(&consumerCommits, "consumer-commits", 0, "durable consumer commits to generate on partition zero")
 	flag.BoolVar(&withSnapshots, "snapshots", false, "publish system-log projection snapshots before reopen")
-	flag.BoolVar(&invalidateSnapshot, "invalidate-snapshot", false, "invalidate the catalog snapshot before reopen")
+	flag.BoolVar(&invalidateSnapshot, "invalidate-snapshot", false, "invalidate both system-log snapshots before reopen")
 	flag.StringVar(&output, "output", "", "write JSON report to this path (stdout by default)")
 	flag.Parse()
-	if dir == "" || records == 0 || partitions == 0 || batchRecords == 0 || segmentBytes == 0 {
-		fatal("data-dir, records, partitions, batch-records, and segment-bytes must be positive")
+	if dir == "" || records == 0 || partitions == 0 || batchRecords == 0 || segmentBytes == 0 || catalogTopics == 0 {
+		fatal("data-dir, records, partitions, batch-records, segment-bytes, and catalog-topics must be positive")
+	}
+	if uint64(partitions) > uint64(^uint32(0)) || uint64(batchRecords) > uint64(^uint32(0)) || uint64(catalogTopics) > uint64(^uint32(0)) {
+		fatal("partitions, batch-records, and catalog-topics must fit in uint32")
+	}
+	if consumerCommits > records {
+		fatal("consumer-commits (%d) cannot exceed records per partition (%d)", consumerCommits, records)
 	}
 	if invalidateSnapshot && !withSnapshots {
 		fatal("invalidate-snapshot requires snapshots")
@@ -96,6 +109,13 @@ func main() {
 	if err != nil {
 		_ = store.Close()
 		fatal("create topic: %v", err)
+	}
+	for topic := uint(1); topic < catalogTopics; topic++ {
+		name := fmt.Sprintf("history-catalog-%06d", topic)
+		if _, err := store.CreateTopic(name, 1, options); err != nil {
+			_ = store.Close()
+			fatal("create catalog topic %q: %v", name, err)
+		}
 	}
 	payload := []byte(strings.Repeat("x", 256))
 	var written uint64
@@ -121,6 +141,46 @@ func main() {
 			written += count
 		}
 	}
+	if consumerCommits > 0 {
+		consumer, err := store.OpenConsumer(context.Background(), "history-scale", descriptor.ID, 0, api.ConsumerOptions{Start: api.GroupStartEarliest})
+		if err != nil {
+			_ = store.Close()
+			fatal("open history consumer: %v", err)
+		}
+		var delivered uint64
+		for delivered < records {
+			result, err := consumer.Poll(context.Background(), api.FetchOptions{MaxRecords: 4096, MaxBytes: 4 << 20})
+			if err != nil {
+				_ = consumer.Close()
+				_ = store.Close()
+				fatal("deliver history records at %d: %v", delivered, err)
+			}
+			if result.NextOffset <= delivered {
+				_ = consumer.Close()
+				_ = store.Close()
+				fatal("history consumer made no progress at %d", delivered)
+			}
+			delivered = result.NextOffset
+		}
+		quotient, remainder := records/consumerCommits, records%consumerCommits
+		for commit := uint64(1); commit <= consumerCommits; commit++ {
+			next := commit * quotient
+			if commit < remainder {
+				next += commit
+			} else {
+				next += remainder
+			}
+			if err := consumer.Commit(context.Background(), next); err != nil {
+				_ = consumer.Close()
+				_ = store.Close()
+				fatal("write consumer commit %d at offset %d: %v", commit, next, err)
+			}
+		}
+		if err := consumer.Close(); err != nil {
+			_ = store.Close()
+			fatal("close history consumer: %v", err)
+		}
+	}
 	if withSnapshots {
 		if err := store.SaveSnapshots(); err != nil {
 			_ = store.Close()
@@ -131,14 +191,11 @@ func main() {
 		fatal("close generated store: %v", err)
 	}
 	if invalidateSnapshot {
-		path := filepath.Join(dir, "system", "cluster-metadata", "0", "projection.snapshot")
-		data, err := os.ReadFile(path)
-		if err != nil || len(data) < 32 {
-			fatal("read catalog snapshot for invalidation: %v", err)
-		}
-		data[len(data)/2] ^= 0xff
-		if err := os.WriteFile(path, data, 0o600); err != nil {
-			fatal("invalidate catalog snapshot: %v", err)
+		for _, systemLog := range []string{"cluster-metadata", "consumer-offsets"} {
+			path := filepath.Join(dir, "system", systemLog, "0", "projection.snapshot")
+			if err := invalidate(path); err != nil {
+				fatal("invalidate %s snapshot: %v", systemLog, err)
+			}
 		}
 	}
 
@@ -159,7 +216,7 @@ func main() {
 		fatal("close reopened store: %v", err)
 	}
 	segments, logBytes := inventory(dir)
-	result := report{Version: 1, DataDir: dir, RecordsRequested: records, RecordsWritten: written, Partitions: uint32(partitions), SegmentBytes: segmentBytes, BatchRecords: uint32(batchRecords), Snapshots: withSnapshots, SnapshotInvalidated: invalidateSnapshot, Segments: segments, LogBytes: logBytes, OpenNanos: openNanos, HeapAllocBefore: before.HeapAlloc, HeapAllocAfter: after.HeapAlloc, HeapAllocDelta: int64(after.HeapAlloc) - int64(before.HeapAlloc), HeapInuseAfter: after.HeapInuse, RSSBefore: rssBefore, RSSAfter: rssAfter, SnapshotDiagnostics: fmt.Sprintf("catalog=%v offsets=%v", diagnostics.Catalog, diagnostics.Offsets)}
+	result := report{Version: 2, DataDir: dir, RecordsRequested: records, RecordsWritten: written, Partitions: uint32(partitions), SegmentBytes: segmentBytes, BatchRecords: uint32(batchRecords), CatalogTopics: uint32(catalogTopics), ConsumerCommits: consumerCommits, Snapshots: withSnapshots, SnapshotInvalidated: invalidateSnapshot, Segments: segments, LogBytes: logBytes, OpenNanos: openNanos, HeapAllocBefore: before.HeapAlloc, HeapAllocAfter: after.HeapAlloc, HeapAllocDelta: int64(after.HeapAlloc) - int64(before.HeapAlloc), HeapInuseAfter: after.HeapInuse, RSSBefore: rssBefore, RSSAfter: rssAfter, SnapshotDiagnostics: fmt.Sprintf("catalog=%v offsets=%v", diagnostics.Catalog, diagnostics.Offsets)}
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		fatal("encode report: %v", err)
@@ -171,6 +228,18 @@ func main() {
 	if err := os.WriteFile(output, append(data, '\n'), 0o644); err != nil {
 		fatal("write report: %v", err)
 	}
+}
+
+func invalidate(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if len(data) < 32 {
+		return fmt.Errorf("snapshot is only %d bytes", len(data))
+	}
+	data[len(data)/2] ^= 0xff
+	return os.WriteFile(path, data, 0o600)
 }
 
 func inventory(root string) (segments, bytes uint64) {
