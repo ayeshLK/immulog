@@ -271,15 +271,46 @@ filesystem and device separately.
 
 ## Backups and file handling
 
-There is no general backup/restore protocol in this release. `SaveSnapshots`
+The supported file-level procedure is a cold, quiesced copy. `SaveSnapshots`
 creates replaceable projection caches for faster startup; it is not a backup
 and cannot replace the authoritative log.
 
-For a file-level backup, stop the store cleanly before copying the complete
-data directory, or use a filesystem snapshot whose consistency guarantees are
-understood and tested by the deployment. Preserve the directory structure and
-all authoritative files. Do not restore by copying selected segments, deleting
-`LOCK`, or editing catalog metadata by hand.
+### Cold copy and restore
+
+1. Stop and join every application writer, consumer, and maintenance task.
+2. Close the store successfully and keep its complete directory intact. The
+   close must finish before any file is copied.
+3. Copy the entire directory tree, including `LOCK`, `system/`, `topics/`,
+   segment files, indexes, time indexes, snapshots, and topic-preparation
+   markers. Preserve file contents, permissions, and directory names.
+4. Restore into a new, isolated destination directory on a supported
+   filesystem and device. Do not point two stores at the same directory.
+5. Open the destination and stop if it returns an error. Inspect
+   `SnapshotDiagnostics` and treat snapshot failures as a reason to verify
+   replay and the authoritative logs, not as permission to discard files.
+6. Before resuming traffic, validate the expected topic catalog, retained
+   `[L,H]` boundaries, representative records, and durable consumer offsets.
+   Reopen or run the deployment's normal read/commit checks before admitting
+   writers.
+
+The complete-directory copy is required because catalog and consumer-offset
+logs, retention boundaries, and user segments are authoritative together.
+Never copy selected segments, delete or replace `LOCK`, edit catalog metadata,
+or use a projection snapshot as a substitute for the complete directory. If
+opening the restored directory reports corruption or an unsupported format,
+preserve it for investigation; do not truncate or repair authoritative files
+by hand. The cold-copy and restore path is covered by the storage regression
+test `TestColdCopyRestorePreservesAuthoritativeState`.
+
+A live filesystem snapshot is a separate deployment feature, not an
+`immulog` backup API. Use one only when the filesystem/device guarantees that
+the snapshot is crash-consistent across the complete store directory and all
+required flushes are honored. Snapshot the directory as one unit while the
+application's write and maintenance behavior is compatible with that
+guarantee, and test crash recovery from the resulting snapshot on the target
+platform before relying on it. A snapshot that can contain independently
+timed files, omit namespace durability, or capture an in-flight mutation is
+not equivalent to the cold procedure.
 
 ## Security boundary
 
