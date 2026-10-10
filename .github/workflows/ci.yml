@@ -36,6 +36,11 @@ jobs:
         run: |
           bash -n scripts/qualify-durability.sh
           bash scripts/qualify-durability.sh --help
+          if bash scripts/qualify-durability.sh --output-dir "$PWD/qualification-evidence"; then
+            echo "runner accepted an evidence directory inside the clone" >&2
+            exit 1
+          fi
+          test ! -e qualification-evidence
       - name: Check durability qualification PowerShell runner
         if: runner.os == 'Windows'
         shell: pwsh

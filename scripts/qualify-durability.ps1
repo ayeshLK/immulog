@@ -16,8 +16,9 @@ Run the native durability evidence suite on Windows and create an upload-ready
 
 Options:
   -OutputDirectory PATH  New or empty evidence directory. It should be on the
-                         filesystem being evaluated. The default is a
-                         timestamped directory under the current user's home.
+                         filesystem being evaluated and outside the Git clone.
+                         The default is a timestamped directory under the
+                         current user's home.
   -Help                  Show this help.
 
 The runner refuses a dirty Git worktree. It uses an isolated temporary
@@ -63,7 +64,15 @@ if ($LASTEXITCODE -ne 0 -or $GoVersion -notmatch '^go1\.(25|2[6-9]|[3-9][0-9])(\
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 	$OutputDirectory = Join-Path $HOME ("immulog-qualification-" + (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss"))
 }
+$PathSeparators = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
+$OutputComparison = $OutputDirectory.TrimEnd($PathSeparators)
+$RepositoryPath = [System.IO.Path]::GetFullPath($RepositoryRoot).TrimEnd($PathSeparators)
+$RepositoryPrefix = $RepositoryPath + [System.IO.Path]::DirectorySeparatorChar
+if ($OutputComparison.Equals($RepositoryPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+	$OutputComparison.StartsWith($RepositoryPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+	throw "Output directory must be outside the Git clone: $OutputDirectory"
+}
 if (Test-Path $OutputDirectory) {
 	if (@(Get-ChildItem -Force $OutputDirectory).Count -ne 0) {
 		throw "Output directory is not empty: $OutputDirectory"

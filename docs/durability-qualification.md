@@ -81,6 +81,8 @@ choose an empty directory on it:
 ./scripts/qualify-durability.sh --output-dir /path/on/target-volume/immulog-evidence
 ```
 
+The evidence directory must be outside the cloned repository.
+
 ### Windows
 
 Run from PowerShell in the cloned repository. This process-scoped execution
@@ -100,11 +102,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\qualify-durability
   -OutputDirectory 'D:\immulog-evidence'
 ```
 
-The runners require a clean Git worktree and keep all test data under the
-selected evidence directory. They never open an existing application data
-directory. Review the archive for private hostnames, usernames, paths, or
-volume labels before attaching it to issue #67. If a command fails, preserve
-the archive and report the first failure rather than rerunning until green.
+The evidence directory must be outside the cloned repository.
+
+The runners require a clean Git worktree, reject evidence paths inside the
+clone, and keep all test data under the selected evidence directory. They never
+open an existing application data directory. Review the archive for private
+hostnames, usernames, paths, or volume labels before attaching it to issue #67.
+If a command fails, preserve the archive and report the first failure rather
+than rerunning until green.
 
 These scripts exercise deterministic fault injection and abrupt process
 termination. They do not simulate physical power loss, device removal,

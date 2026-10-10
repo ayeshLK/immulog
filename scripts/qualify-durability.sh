@@ -10,8 +10,9 @@ upload-ready .tar.gz archive. No administrator privileges are required.
 
 Options:
   --output-dir PATH  New or empty evidence directory. It should be on the
-                     filesystem being evaluated. The default is a timestamped
-                     directory under the current user's home directory.
+                     filesystem being evaluated and outside the Git clone. The
+                     default is a timestamped directory under the current
+                     user's home directory.
   --help             Show this help.
 
 The runner refuses a dirty Git worktree. It uses an isolated temporary
@@ -73,12 +74,33 @@ fi
 if [[ -z "$output_dir" ]]; then
 	output_dir="$HOME/immulog-qualification-$(date -u +%Y%m%d-%H%M%S)"
 fi
+if [[ -e "$output_dir" ]]; then
+	output_dir=$(cd "$output_dir" && pwd -P)
+else
+	output_parent=$(dirname "$output_dir")
+	output_name=$(basename "$output_dir")
+	if [[ ! -d "$output_parent" ]]; then
+		echo "output directory parent does not exist: $output_parent" >&2
+		exit 2
+	fi
+	if [[ "$output_name" == . || "$output_name" == .. ]]; then
+		echo "output directory must name a new or empty directory" >&2
+		exit 2
+	fi
+	output_parent=$(cd "$output_parent" && pwd -P)
+	output_dir="$output_parent/$output_name"
+fi
+case "$output_dir" in
+	"$repo_root"|"$repo_root"/*)
+		echo "output directory must be outside the Git clone: $output_dir" >&2
+		exit 2
+		;;
+esac
 if [[ -e "$output_dir" ]] && [[ -n "$(find "$output_dir" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
 	echo "output directory is not empty: $output_dir" >&2
 	exit 2
 fi
 mkdir -p "$output_dir"
-output_dir=$(cd "$output_dir" && pwd -P)
 test_tmp="$output_dir/test-tmp"
 mkdir -p "$test_tmp"
 export TMPDIR="$test_tmp"
