@@ -372,9 +372,10 @@ The checked [`examples/restart`](../examples/restart) program combines the
 common recovery steps in one small application:
 
 1. Put an application-owned request identity in the record key.
-2. If append returns `api.ErrAppendOutcomeUnknown`, scan authoritative records
-   for that identity before choosing a retry policy. A missing match is still
-   ambiguous; immulog does not provide producer-side deduplication.
+2. If append returns `api.ErrAppendOutcomeUnknown`, stop writers, close and
+   reopen the store, then scan authoritative records for that identity before
+   choosing a retry policy. A missing match is still ambiguous; immulog does
+   not provide producer-side deduplication.
 3. Apply consumer effects using the same identity, then commit the next offset.
 4. Expect the record again after a process stop between applying the effect and
    committing. Deduplicate the effect and commit the redelivery.

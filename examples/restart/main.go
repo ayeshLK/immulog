@@ -78,6 +78,25 @@ func run(ctx context.Context, dir string) (report, error) {
 	}
 	record, appendErr := partitions[0].Append(ctx, request)
 	if appendErr != nil {
+		if !errors.Is(appendErr, api.ErrAppendOutcomeUnknown) {
+			_ = store.Close()
+			return result, appendErr
+		}
+		// The terminal writer may still be finishing an admitted append. Close
+		// the store before reopening so reconciliation observes the authority
+		// selected by startup recovery rather than racing the writer.
+		if err := store.Close(); err != nil {
+			return result, err
+		}
+		store, err = storage.Open(dir)
+		if err != nil {
+			return result, err
+		}
+		partitions, err = store.OpenTopic(descriptor.Name)
+		if err != nil {
+			_ = store.Close()
+			return result, err
+		}
 		record, appendErr = reconcileAppend(ctx, partitions[0], request, appendErr)
 	}
 	if appendErr != nil {

@@ -34,7 +34,8 @@ func TestRestartExample(t *testing.T) {
 }
 
 func TestReconcileAppendFindsDurableRecord(t *testing.T) {
-	store, err := storage.Open(t.TempDir())
+	dir := t.TempDir()
+	store, err := storage.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,6 +50,18 @@ func TestReconcileAppendFindsDurableRecord(t *testing.T) {
 	}
 	request := api.AppendRequest{Topic: descriptor.ID, Partition: 0, Key: []byte("request-1"), Value: []byte("value")}
 	if _, err := partitions[0].Append(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = storage.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	partitions, err = store.OpenTopic(descriptor.Name)
+	if err != nil {
 		t.Fatal(err)
 	}
 	record, err := reconcileAppend(context.Background(), partitions[0], request, api.ErrAppendOutcomeUnknown)
