@@ -366,6 +366,25 @@ Important error classes include:
 
 The full stable error set is defined in [`api/errors.go`](../api/errors.go).
 
+## Follow the restart-safe application pattern
+
+The checked [`examples/restart`](../examples/restart) program combines the
+common recovery steps in one small application:
+
+1. Put an application-owned request identity in the record key.
+2. If append returns `api.ErrAppendOutcomeUnknown`, scan authoritative records
+   for that identity before choosing a retry policy. A missing match is still
+   ambiguous; immulog does not provide producer-side deduplication.
+3. Apply consumer effects using the same identity, then commit the next offset.
+4. Expect the record again after a process stop between applying the effect and
+   committing. Deduplicate the effect and commit the redelivery.
+5. Reopen the store and verify that the committed consumer position resumes.
+
+The example is compiled and tested by `go test ./...`; it is intentionally a
+local single-process example, not a substitute for a database transaction or a
+distributed broker. For the storage contract and deployment limits, see the
+[normative specification](spec/spec.md) and [production guide](production.md).
+
 ## Reopen after a clean shutdown
 
 The directory can be reopened after `Store.Close`:

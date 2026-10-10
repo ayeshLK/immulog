@@ -53,6 +53,22 @@ files. Applications and deployments remain responsible for filesystem
 permissions, at-rest encryption, backups, and storage devices that honor flush
 requests.
 
+## Choose the right durability boundary
+
+Choose `immulog` when one process needs a local, replayable event history,
+durable work queue, or embedded ingestion log without operating another
+service. Choose a database-backed journal or outbox when event state must be
+committed atomically with relational data, queried transactionally, or shared
+by multiple application processes. Choose a distributed broker when multiple
+nodes need network access, replicated availability, broker-managed consumer
+groups, or cross-host failover. Those choices add operational and consistency
+contracts that are outside immulog's local single-process scope.
+
+The [restart example](examples/restart) shows the application boundary that
+still applies when using immulog: preserve a request identity, quiesce and
+reopen before reconciling an `ErrAppendOutcomeUnknown` result, and make
+consumer-side effects idempotent because delivery is at least once.
+
 ## Install
 
 `immulog` requires Go 1.25 or newer. Until the first tagged release, pin a
