@@ -14,6 +14,7 @@ portable throughput guarantees or release thresholds unless explicitly stated.
   - [Soak workloads](#soak-workloads)
   - [Environment and artifacts](#environment-and-artifacts)
 - [Recorded results](#recorded-results)
+  - [Long-history recovery matrix — 2026-10-10](#long-history-recovery-matrix--2026-10-10)
   - [Sustained compaction soak — 2026-10-10](#sustained-compaction-soak--2026-10-10)
   - [Compaction soak stress — 2026-10-09](#compaction-soak-stress--2026-10-09)
   - [Microbenchmark smoke — 2026-10-09](#microbenchmark-smoke--2026-10-09)
@@ -163,11 +164,12 @@ perf/history/run.sh \
 ```
 
 Baseline, valid-snapshot, and invalid-snapshot cases must use identical history
-dimensions. Snapshots accelerate catalog and consumer-offset projection replay;
-increasing only user records or segments does not by itself create a meaningful
-snapshot comparison. Treat heap and RSS as whole-process observations and use
-multiple runs rather than interpreting one cold-open sample as a qualification
-result. See `perf/history/README.md` for all controls and artifact semantics.
+dimensions. In the current non-compacted bootstrap path, authoritative system
+logs are replayed before optional projection snapshots are validated; do not
+assume their presence shortens recovery. Treat heap and RSS as whole-process
+observations and use multiple runs rather than interpreting one cold-open sample
+as a qualification result. See `perf/history/README.md` for all controls and
+artifact semantics.
 
 ### Soak workloads
 
@@ -329,6 +331,75 @@ limits; it is not a routine local smoke.
 The current evidence sets below are retained here. Older result records were
 removed because the benchmark and soak frameworks evolved; they should not be
 compared directly with these measurements.
+
+<!-- history-evidence:commit=39f641aefe67d1a62dc08b63a7dafcc871ed10cc,date=2026-10-10 -->
+
+### Long-history recovery matrix — 2026-10-10
+
+This matrix measures a fresh `Store.Open` after generating and closing an
+isolated store. It is recovery-scaling and snapshot-validation evidence, not a
+steady-state throughput result or release threshold. The process reopened a
+fresh store instance, but the runner did not evict operating-system filesystem
+caches, so “cold” here does not mean disk-cache cold.
+
+| Environment | Value |
+|---|---|
+| Run interval | 2026-10-10 07:47:36–08:06:30 (+05:30) |
+| Commit / branch | `39f641aefe67d1a62dc08b63a7dafcc871ed10cc` / `main` |
+| Worktree status | Clean |
+| Processor | Intel(R) Core(TM) i7-10510U CPU @ 1.80GHz |
+| CPU count | 8 logical CPUs |
+| Memory | Not captured |
+| OS / kernel | Linux `7.0.0-38-generic` |
+| Architecture | `amd64`, `GOAMD64=v1` |
+| Go | `1.26.2` |
+| Filesystem | ext4; 68% used at initial capture |
+
+Configuration: one data-bearing partition, 256-byte record values, 64KiB
+segments, 32 records per append batch, 100 total catalog topics, 1,000 durable
+consumer commits, three isolated repetitions, and baseline, valid-snapshot, and
+invalid-snapshot variants. The invalid variant corrupted both projection
+snapshots before reopen. All 27 cases exited successfully and wrote the
+requested record count.
+
+```sh
+perf/history/run.sh \
+  --run-dir "$HOME/immulog-history-$(date +%Y%m%d-%H%M%S)" \
+  --records 10000,100000,1000000 \
+  --catalog-topics 100 \
+  --consumer-commits 1000 \
+  --runs 3 \
+  --snapshots
+```
+
+Open durations are medians of three independent cases; parentheses show the
+observed minimum–maximum range. Segment and log-byte counts were identical
+across the three snapshot variants at each record scale.
+
+| Records | Segments | Log bytes | Baseline open | Valid snapshot | Invalid snapshots |
+|---:|---:|---:|---:|---:|---:|
+| 10,000 | 153 | 3,202,254 B | 10.12ms (9.65–10.80ms) | 11.43ms (11.17–11.69ms) | 13.69ms (13.65–13.73ms) |
+| 100,000 | 622 | 29,662,246 B | 36.49ms (36.37–37.93ms) | 37.88ms (36.48–40.71ms) | 38.06ms (37.82–38.61ms) |
+| 1,000,000 | 5,310 | 294,262,282 B | 343.55ms (331.34–395.99ms) | 340.99ms (328.89–352.91ms) | 341.62ms (338.74–342.61ms) |
+
+Every valid-snapshot case reported no catalog or offsets diagnostic. Every
+invalid-snapshot case reopened successfully and reported `snapshot digest
+mismatch` for both catalog and consumer offsets, confirming that corrupted
+optional artifacts did not prevent an authoritative open. Across all cases,
+post-open `HeapAlloc` observations ranged from 1,514,368 to 2,962,448 bytes and
+RSS from 10,317,824 to 12,664,832 bytes, with no monotonic increase across the
+tested record scales. These are single whole-process observations after open,
+not peak-memory bounds.
+
+Baseline median reopen time increased from 10.12ms at 10,000 records and 153
+segments to 343.55ms at 1,000,000 records and 5,310 segments. The one-million
+baseline had the widest run-to-run range, so its median should be preferred to
+an individual sample. Valid snapshots showed no repeatable recovery advantage.
+On this commit, the ordinary bootstrap path replays the authoritative catalog
+and offsets logs before validating optional projection snapshots; the snapshot
+variants therefore measure validation and corruption diagnostics, not
+snapshot-seeded replay acceleration. Raw artifacts are retained outside the
+repository.
 
 <!-- soak-evidence:commit=8b1ac41f2bf679aabe37a3a74bf5dc082ec4a0af,date=2026-10-10 -->
 
