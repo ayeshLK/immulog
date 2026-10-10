@@ -30,6 +30,33 @@ jobs:
           go-version: 1.26.x
           check-latest: true
           cache: false
+      - name: Check durability qualification shell runner
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bash -n scripts/qualify-durability.sh
+          bash scripts/qualify-durability.sh --help
+          if bash scripts/qualify-durability.sh --output-dir "$PWD/qualification-evidence"; then
+            echo "runner accepted an evidence directory inside the clone" >&2
+            exit 1
+          fi
+          test ! -e qualification-evidence
+      - name: Check durability qualification PowerShell runner
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path scripts/qualify-durability.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -ne 0) {
+            $errors | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
+          .\scripts\qualify-durability.ps1 -Help
       - name: Vet
         run: go vet ./...
       - name: Test

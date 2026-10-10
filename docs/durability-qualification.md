@@ -47,6 +47,76 @@ Native macOS and Windows durability qualification is **not completed**. Their
 CI jobs remain build/test coverage only; Docker-based Linux containers are not
 substitutes for native filesystem and kernel evidence on those platforms.
 
+## Contribute native qualification evidence
+
+New contributors can run the complete evidence suite with one platform script.
+The runner creates an isolated temporary directory, captures the commit, Go,
+OS, and filesystem details, records every command and exit status, and produces
+an archive ready to attach to [issue #67](https://github.com/ayeshLK/immulog/issues/67).
+No administrator or root privileges are required.
+
+First install [Go 1.25 or newer](https://go.dev/doc/install) and Git, then clone
+the repository:
+
+```text
+git clone https://github.com/ayeshLK/immulog.git
+cd immulog
+```
+
+### macOS or Linux
+
+Run from Terminal:
+
+```sh
+chmod +x scripts/qualify-durability.sh
+./scripts/qualify-durability.sh
+```
+
+The default evidence directory is
+`$HOME/immulog-qualification-<timestamp>`, and the upload-ready artifact is the
+adjacent `.tar.gz` file. To exercise a specific local filesystem or volume,
+choose an empty directory on it:
+
+```sh
+./scripts/qualify-durability.sh --output-dir /path/on/target-volume/immulog-evidence
+```
+
+The evidence directory must be outside the cloned repository.
+
+### Windows
+
+Run from PowerShell in the cloned repository. This process-scoped execution
+policy does not change the machine's permanent PowerShell configuration and
+does not require an administrator shell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\qualify-durability.ps1
+```
+
+The default evidence directory is
+`$HOME\immulog-qualification-<timestamp>`, and the upload-ready artifact is the
+adjacent `.zip` file. To exercise a specific local NTFS or ReFS volume:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\qualify-durability.ps1 `
+  -OutputDirectory 'D:\immulog-evidence'
+```
+
+The evidence directory must be outside the cloned repository.
+
+The runners require a clean Git worktree, reject evidence paths inside the
+clone, and keep all test data under the selected evidence directory. They never
+open an existing application data directory. Review the archive for private
+hostnames, usernames, paths, or volume labels before attaching it to issue #67.
+If a command fails, preserve the archive and report the first failure rather
+than rerunning until green.
+
+These scripts exercise deterministic fault injection and abrupt process
+termination. They do not simulate physical power loss, device removal,
+controller-cache loss, or every possible torn write. Docker and WSL report
+Linux behavior and cannot qualify native macOS or Windows behavior. Clearly
+identify virtual-machine results as virtualized evidence.
+
 ## Existing deterministic coverage
 
 The current suite covers these persistence transitions without mutating real
