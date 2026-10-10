@@ -23,12 +23,15 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/ayeshLK/immulog/api"
 	"github.com/ayeshLK/immulog/storage"
 )
 
 var errReconciliationRequired = errors.New("application reconciliation required")
+
+const reconciliationTimeout = 30 * time.Second
 
 type report struct {
 	ReconciledOffset uint64
@@ -88,6 +91,9 @@ func run(ctx context.Context, dir string) (report, error) {
 		if err := store.Close(); err != nil {
 			return result, err
 		}
+		recoveryCtx, cancel := context.WithTimeout(context.Background(), reconciliationTimeout)
+		defer cancel()
+		ctx = recoveryCtx
 		store, err = storage.Open(dir)
 		if err != nil {
 			return result, err
@@ -192,13 +198,15 @@ func run(ctx context.Context, dir string) (report, error) {
 // store) so the scan observes the authoritative recovery boundary. A missing
 // match remains an unknown outcome: callers must choose a retry policy that is
 // safe for their application rather than blindly appending again.
-func reconcileAppend(ctx context.Context, partition *storage.Partition, request api.AppendRequest, appendErr error) (api.Record, error) {
+func reconcileAppend(_ context.Context, partition *storage.Partition, request api.AppendRequest, appendErr error) (api.Record, error) {
 	if !errors.Is(appendErr, api.ErrAppendOutcomeUnknown) {
 		return api.Record{}, appendErr
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), reconciliationTimeout)
+	defer cancel()
 	stats := partition.Stats()
 	for offset := stats.LogStartOffset; offset < stats.DurableEnd; {
-		result, err := partition.Fetch(ctx, offset, api.FetchOptions{MaxRecords: 128, MaxBytes: 1 << 20})
+		result, err := partition.Fetch(ctx, offset, api.FetchOptions{MaxRecords: 1, MaxBytes: 64 << 20})
 		if err != nil {
 			return api.Record{}, fmt.Errorf("reconcile append: %w", err)
 		}

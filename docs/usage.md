@@ -371,7 +371,9 @@ The full stable error set is defined in [`api/errors.go`](../api/errors.go).
 The checked [`examples/restart`](../examples/restart) program combines the
 common recovery steps in one small application:
 
-1. Put an application-owned request identity in the record key.
+1. Put an application-owned request identity in the record key. It must remain
+   unique and immutable within the partition's retained history; a reused key
+   can match an older record.
 2. If append returns `api.ErrAppendOutcomeUnknown`, stop writers, close and
    reopen the store, then scan authoritative records for that identity before
    choosing a retry policy. A missing match is still ambiguous; immulog does

@@ -48,6 +48,10 @@ func TestReconcileAppendFindsDurableRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	large := api.AppendRequest{Topic: descriptor.ID, Partition: 0, Key: []byte("large-prefix"), Value: make([]byte, 2<<20)}
+	if _, err := partitions[0].Append(context.Background(), large); err != nil {
+		t.Fatal(err)
+	}
 	request := api.AppendRequest{Topic: descriptor.ID, Partition: 0, Key: []byte("request-1"), Value: []byte("value")}
 	if _, err := partitions[0].Append(context.Background(), request); err != nil {
 		t.Fatal(err)
@@ -74,5 +78,46 @@ func TestReconcileAppendFindsDurableRecord(t *testing.T) {
 	_, err = reconcileAppend(context.Background(), partitions[0], api.AppendRequest{Topic: descriptor.ID, Partition: 0, Key: []byte("missing")}, api.ErrAppendOutcomeUnknown)
 	if !errors.Is(err, errReconciliationRequired) {
 		t.Fatalf("missing reconciliation error = %v", err)
+	}
+}
+
+func TestReconcileAppendUsesIndependentContext(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := store.CreateTopic("orders", 1, storage.PartitionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partitions, err := store.OpenTopic(descriptor.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := api.AppendRequest{Topic: descriptor.ID, Partition: 0, Key: []byte("canceled-request"), Value: []byte("value")}
+	if _, err := partitions[0].Append(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = storage.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	partitions, err = store.OpenTopic(descriptor.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	record, err := reconcileAppend(canceled, partitions[0], request, api.ErrAppendOutcomeUnknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(record.Key) != "canceled-request" {
+		t.Fatalf("reconciled key = %q", record.Key)
 	}
 }

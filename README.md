@@ -65,9 +65,10 @@ groups, or cross-host failover. Those choices add operational and consistency
 contracts that are outside immulog's local single-process scope.
 
 The [restart example](examples/restart) shows the application boundary that
-still applies when using immulog: preserve a request identity, quiesce and
-reopen before reconciling an `ErrAppendOutcomeUnknown` result, and make
-consumer-side effects idempotent because delivery is at least once.
+still applies when using immulog: preserve a request identity that is unique
+and immutable within the partition's retained history, quiesce and reopen
+before reconciling an `ErrAppendOutcomeUnknown` result, and make consumer-side
+effects idempotent because delivery is at least once.
 
 ## Install
 
