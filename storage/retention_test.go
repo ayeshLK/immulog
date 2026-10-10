@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -448,6 +449,45 @@ func TestBackgroundRetentionHonorsOpenPartitionLimitAcrossCatalogPartitions(t *t
 			t.Fatalf("background retention state = L[%d %d], open=%d", updated.Partitions[0].RetainedL, updated.Partitions[1].RetainedL, stats.OpenPartitions)
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestBackgroundRetentionFailureIsObservableAndClearedByRetry(t *testing.T) {
+	dir, _ := prepareRetentionLimitFixture(t, 1)
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	injected := errors.New("injected background retention failure")
+	failed := atomic.Bool{}
+	failed.Store(true)
+	store.retentionMu.Lock()
+	store.catalogAppend = func(batch api.RecordBatch) (uint64, error) {
+		if failed.Load() {
+			return 0, injected
+		}
+		return store.catalog.AppendBatch(batch)
+	}
+	store.retentionMu.Unlock()
+
+	store.runBackgroundRetention()
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RetentionMaintenance.LastFailure != injected.Error() {
+		t.Fatalf("background retention failure was not reported: %#v", stats.RetentionMaintenance)
+	}
+
+	failed.Store(false)
+	store.runBackgroundRetention()
+	stats, err = store.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RetentionMaintenance.LastSuccess.IsZero() || stats.RetentionMaintenance.LastFailure != "" {
+		t.Fatalf("successful retry did not clear failure: %#v", stats.RetentionMaintenance)
 	}
 }
 
