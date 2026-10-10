@@ -6,20 +6,25 @@
 Public contracts and stable domain errors are in `api/`; encoding, segment
 management, locking, partitions, and the store live in `storage/`. Core
 correctness tests are co-located with their package (`*_test.go`); benchmark
-and long-running soak harnesses live under `perf/`. `README.md` describes the
-current scope, `docs/spec/spec.md` is the normative behavioral and persistence
-contract, `BENCHMARKS.md` is the source of truth for performance methodology
-and dated evidence, and `PROGRESS.md` records the local implementation
+and long-running evidence harnesses live under `perf/`. `README.md` describes
+the current scope, `docs/spec/spec.md` is the normative behavioral and
+persistence contract, `docs/production.md` owns deployment and cold-backup
+guidance, `docs/durability-qualification.md` records qualified platform claims,
+and `BENCHMARKS.md` is the source of truth for performance methodology and dated
+evidence. `docs/coordination.md` is a future architecture proposal, not current
+runtime behavior. `PROGRESS.md` records the ignored local implementation
 checkpoint. Keep changes within the existing package boundaries; do not add
 network or replication code to this local single-process slice.
 
 The `Store` owns the canonical directory, stable `LOCK`, catalog and consumer
 offset system partitions, user partitions, retention, snapshots, and disk
-admission. Catalog metadata is itself an append-only system log. Each partition
-uses bounded multi-producer ingress with one terminal durable writer; segments
-are authoritative, while indexes, snapshots, and live-tail caches are
-rebuildable. Managed consumers are same-process, at-least-once assignments
-with durable commits and fencing.
+admission. Catalog metadata is itself an append-only system log; explicit
+system-log compaction can replace obsolete prefixes with authoritative
+checkpoints and absolute-offset suffixes. Each partition uses bounded
+multi-producer ingress with one terminal durable writer; segments and selected
+system checkpoints are authoritative, while indexes, projection snapshots, and
+live-tail caches are rebuildable. Managed consumers are same-process,
+at-least-once assignments with durable commits and fencing.
 
 ## Architecture Map
 
@@ -31,13 +36,20 @@ The exported surface is small (`Store`, `Partition`, `Reader`, `Consumer`,
 
 ```
 LOCK                                  stable ownership lock (lock_linux.go)
-system/cluster-metadata/0/            catalog system log (__cluster_metadata)
-system/consumer-offsets/0/            offsets system log (__consumer_offsets)
+system/cluster-metadata/0/            legacy catalog log (__cluster_metadata)
+  projection.snapshot                 optional non-authoritative cache
+system/consumer-offsets/0/            legacy offsets log (__consumer_offsets)
+  projection.snapshot                 optional non-authoritative cache
+system/metadata/active-manifest       selected compacted generation, when present
+system/metadata/generations/<gen>/    immutable generation authority
+  manifest                            binds both system checkpoints and suffixes
+  cluster-metadata/0/checkpoint       catalog projection at an absolute revision
+  consumer-offsets/0/checkpoint       offsets projection at an absolute revision
+  <system-name>/0/<offset>.log        post-checkpoint absolute-offset suffix
 topics/<topic-uuid>/<partition>/      user partitions
   00000000000000000000.log            segment, base offset zero-padded to 20
   00000000000000000000.index          sampled offset index (rebuildable)
   00000000000000000000.timeindex      sampled time index (rebuildable)
-  projection.snapshot                 system logs only, optional accelerator
   .topic-preparation-v1               crash-safe topic creation marker
 ```
 
@@ -58,9 +70,13 @@ tail when available, and otherwise scan authoritative segments using rebuildable
 index hints. `Reader` is a cursor over `Fetch`.
 
 **Metadata as logs:** catalog and consumer offsets are authoritative append-only
-system partitions replayed into projections during `Open`. Snapshots are
-validated accelerators only; mismatches degrade to replay and are reported by
-`Store.SnapshotDiagnostics`.
+system partitions replayed into projections during `Open`. In the ordinary
+non-compacted path, current bootstrap replays the authoritative logs before it
+validates optional `projection.snapshot` files; snapshot mismatches are
+diagnostic and reported by `Store.SnapshotDiagnostics`, not startup blockers
+after successful replay. Do not confuse these replaceable snapshots with the
+authoritative checkpoints selected by a compaction manifest. Compacted recovery
+decodes the selected checkpoints and replays only their suffix logs.
 
 **Consumers:** `consumer.go` implements one assignment; `group_consumer.go`
 implements same-process multi-partition membership. Both use durable
@@ -70,6 +86,9 @@ close must never unregister its replacement.
 **Cross-cutting:** retention advances the durable log-start boundary before
 deletion; disk pressure uses class-aware byte/inode admission; diagnostics,
 limits, snapshots, indexes, and tails are bounded and rebuildable where noted.
+`StoreStats.RetentionMaintenance` reports the latest bounded background attempt,
+success, and failure, while `StoreStats.SystemLogMaintenance` reports compaction
+generation, reclaimed bytes, cleanup debt, and the latest bounded failure.
 
 ## Build, Test, and Development Commands
 
@@ -82,7 +101,10 @@ is pending; see `docs/durability-qualification.md`.
 Run these from the repository root:
 
 ```sh
-gofmt -w api/*.go storage/*.go perf/benchmarks/*.go perf/soak/*.go
+gofmt -w \
+  api/*.go storage/*.go \
+  perf/analyze/*.go perf/benchmarks/*.go perf/benchmarks/analyze/*.go \
+  perf/history/*.go perf/metrics/*.go perf/soak/*.go
 go mod tidy
 go vet ./...
 go test -shuffle=on ./...
@@ -102,6 +124,13 @@ go test ./storage -run '^$' -fuzz=FuzzDecodeBatch -fuzztime=60m -parallel=1
 go test ./storage -run '^$' -fuzz=FuzzDecodeSegmentHeader -fuzztime=60m -parallel=1
 go test ./storage -run '^$' -fuzz=FuzzPreflightSystemLogSegment -fuzztime=60m -parallel=1
 perf/benchmarks/run.sh --profile smoke
+perf/history/run.sh \
+  --run-dir "$HOME/immulog-history-$(date +%Y%m%d-%H%M%S)" \
+  --records 10000,100000,1000000 \
+  --catalog-topics 100 \
+  --consumer-commits 1000 \
+  --runs 3 \
+  --snapshots
 perf/soak/run.sh --profile mixed --duration 20s --timeout 90s --minimum-free-bytes 0 --minimum-open-files 0
 perf/soak/run.sh --profile mixed --duration 20s --timeout 90s --compaction-interval 500ms --minimum-free-bytes 0 --minimum-open-files 0
 ```
@@ -127,6 +156,15 @@ in a user-side shell loop. Explicit `--data-dir` cannot be combined with
 `--runs`. Benchmark qualification rejects dirty worktrees unless `--allow-dirty`
 is supplied.
 
+`perf/history/run.sh` owns isolated recovery-scaling matrices. It can vary user
+record/segment history, total catalog topics, durable consumer commits, and
+valid/invalid projection snapshots; `--runs` creates independent repetitions.
+Its evidence root records configuration, commands, statuses, commit/worktree
+state, Go/host details, and filesystem metadata. “Cold” means a fresh `Store`
+instance; the runner does not evict operating-system page caches after creating
+the history. Use a clean recorded commit and preserve raw artifacts outside the
+repository.
+
 ### Performance and soak evidence
 
 `BENCHMARKS.md` is authoritative for performance methodology and dated
@@ -134,6 +172,15 @@ results. The benchmark-only `perf/metrics` package provides rate, bounded
 histogram, and exact-sample helpers; append benchmarks report
 `producer-records/s` and `producer-bytes/s`, while fetch benchmarks report
 `consumer-records/s` and `consumer-bytes/s`.
+
+The long-history matrix recorded on 2026-10-10 used three repetitions at
+10,000, 100,000, and 1,000,000 records with 100 catalog topics and 1,000
+consumer commits. At one million records and 5,310 segments, baseline median
+reopen was 343.55ms on the recorded Linux/ext4 host. Valid projection snapshots
+showed no repeatable recovery advantage, consistent with replay-before-
+validation in the ordinary bootstrap path. Treat the result as recovery-scaling
+and snapshot-validation evidence, not a device-independent threshold or proof
+of disk-cold startup. See `BENCHMARKS.md` for ranges and full provenance.
 
 Use the `mixed` soak profile for correctness and resilience coverage. It
 intentionally exercises cancellation, overload, retention, consumer churn,
@@ -183,14 +230,18 @@ stable capacity result.
 ### Durability qualification
 
 `docs/durability-qualification.md` is the source of truth for platform
-qualification status and evidence boundaries. The current Linux baseline on
-merged `main` passed shuffled storage tests, race-enabled storage tests, ten
-repetitions of the process-crash/persistence-boundary suite, all-package tests,
-and vet. This validates deterministic fault injection and abrupt process
-termination on Linux/ext4; it does not prove physical power-loss behavior.
+qualification status and evidence boundaries. The recorded Linux baseline at
+commit `8728522540ccdc9e258ae84a0e7703eec51e9514` passed shuffled storage tests,
+race-enabled storage tests, ten repetitions of the process-crash/persistence-
+boundary suite, all-package tests, and vet. This validates deterministic fault
+injection and abrupt process termination on Linux/ext4; it does not prove
+physical power-loss behavior.
 Native macOS and Windows durability qualification remains incomplete. Preserve
 the tested commit, host/filesystem assumptions, exact commands, exit statuses,
-and raw artifacts outside the repository for future qualification runs.
+and raw artifacts outside the repository for future qualification runs. Issue
+#67 remains on hold until native macOS and Windows evidence is available; a
+Linux Docker container is not a substitute for their native kernel/filesystem
+durability behavior.
 
 ## Coding Style & Naming Conventions
 
@@ -208,10 +259,11 @@ the implementation, especially for malformed bytes, CRC/checksum failures,
 offset continuity, reopen/recovery behavior, locking, and nil-versus-empty
 payload semantics. Storage tests use `t.TempDir()` and never write to a real
 user data directory; use bounded deadlines and explicit barriers for
-concurrency. Keep benchmarks in `perf/benchmarks` and opt-in long-running soak
-workloads in `perf/soak`; they must use public package APIs rather than
-production-private test seams. Run formatting, module tidy, vet, shuffled tests,
-race tests, and coverage before submitting changes.
+concurrency. Keep microbenchmarks in `perf/benchmarks`, recovery-scaling
+workloads in `perf/history`, and opt-in long-running soak workloads in
+`perf/soak`; they must use public package APIs rather than production-private
+test seams. Run formatting, module tidy, vet, shuffled tests, race tests, and
+coverage before submitting changes.
 
 ## Commit & Pull Request Guidelines
 
@@ -227,17 +279,31 @@ SHAs and retain least-privilege permissions.
 
 The filesystem log is authoritative. An acknowledged append requires the batch
 write, file sync, and required namespace sync; unknown outcomes are not rolled
-back. Indexes, snapshots, and the live tail are rebuildable and non-authoritative.
-Startup preflights authoritative storage before mutation; only a verified
-incomplete final tail may be truncated. Retention advances the durable log-start
-boundary before deleting inventoried user artifacts and never reuses offsets;
-system logs are not user-retained.
+back. Legacy system logs or a manifest-selected checkpoint plus suffix are
+authoritative. Indexes, projection snapshots, and the live tail are rebuildable
+and non-authoritative. Startup preflights authoritative storage before mutation;
+only a verified incomplete final tail may be truncated. Retention advances the
+durable log-start boundary before deleting inventoried user artifacts and never
+reuses offsets; system logs are not user-retained.
 
-Snapshots are bound to their log by a projection-prefix digest and are safe
-only as rebuildable accelerators. Keep system-log appends and snapshot builds
-under the store mutex. `SaveSnapshots` should build under the store mutex and
-publish outside it under `snapshotMu`; do not hold the store mutex over file
-write and sync.
+Projection snapshots are bound to their log by a projection-prefix digest and
+are safe only as replaceable, non-authoritative caches. Keep system-log appends
+and snapshot builds under the store mutex. `SaveSnapshots` should build under
+the store mutex and publish outside it under `snapshotMu`; do not hold the store
+mutex over file write and sync. `CompactSystemLogs` is different: it explicitly
+publishes one authoritative generation for both system logs, preserves absolute
+revisions and fencing state, requires protected temporary byte/inode headroom,
+and has no automatic production worker. Preserve its lock ordering, manifest
+commit point, unknown-outcome fencing, and old-generation cleanup debt.
+
+The supported file-level backup is a cold, quiesced copy after successful
+`Store.Close`. Copy and restore the complete directory, including the stable
+`LOCK`, system authority, topics, sidecars, snapshots, and preparation markers;
+never treat a projection snapshot as a backup. Restore into an isolated
+destination and validate it by opening and checking catalog, retained bounds,
+records, and consumer progress. Live filesystem snapshots require separately
+qualified whole-directory crash consistency. Keep
+`TestColdCopyRestorePreservesAuthoritativeState` as a compatibility gate.
 
 A partition keeps a live descriptor only for its active segment. Sealed
 segments are reopened through the bounded `segmentFileCache`; new code reading
@@ -260,14 +326,14 @@ back-references established by `OpenWithOptions`. Pressure tests may replace
 ## CI/CD and Repository Automation
 
 Pull requests and pushes to `main` run `.github/workflows/ci.yml` on Linux with
-Go 1.25 and Go 1.26, source copyright-header checks, formatting, module-tidy, vet, shuffled
-tests, race tests, and package coverage. Fuzzing and performance evidence are
-manual workflows; use `BENCHMARKS.md` for performance commands, environment
-capture, and interpretation; use the opt-in soak settings documented above
-instead of running the soak in ordinary CI. Linux is the only currently
-qualified durability platform. Native macOS and Windows CI are build/test
-checks, not durability qualification; do not expand platform claims without
-the matrix and evidence requirements in `docs/durability-qualification.md`.
+Go 1.25 and Go 1.26, source copyright-header checks, formatting, module-tidy,
+vet, shuffled tests, race tests, and package coverage. Fuzzing and performance
+evidence are manual workflows; use `BENCHMARKS.md` for performance commands,
+environment capture, and interpretation; use the opt-in soak settings documented
+above instead of running the soak in ordinary CI. Linux is the only currently
+qualified durability platform. Native macOS and Windows CI are build/test checks,
+not durability qualification; do not expand platform claims without the matrix
+and evidence requirements in `docs/durability-qualification.md`.
 
 All third-party GitHub Actions must be pinned to full commit SHAs and workflows
 must retain least-privilege permissions. Release preparation and publication are
@@ -284,6 +350,21 @@ freezing the eventual v1 contract. The ingress adapter uses the released
 `github.com/ayeshLK/lib-disruptor v0.6.0`. Future dependency upgrades remain
 subject to the same adapter, durability, cancellation, lifecycle, and
 performance requalification gates.
+
+As of 2026-10-10, the completed local hardening includes system-log compaction,
+background-retention outcome diagnostics, the long-history recovery harness,
+and the tested cold backup/restore procedure. The remaining tracked work is:
+
+- #67: native durability qualification, on hold pending macOS and Windows
+  evidence;
+- #70: adopter decision guidance plus a compiled/tested safe-restart example;
+  this is independent local documentation/example work;
+- #11 and #36: future brokered coordination and cluster-mode design; and
+- #82: the narrower HA replicated-persistence ADR and deterministic model.
+
+The distributed items remain proposals. Do not add production transport,
+replication, consensus, or shared-directory multi-process behavior to the
+current storage slice without a separately reviewed architecture milestone.
 
 `PROGRESS.md` and `DEPENDENCY_AUDIT.md` are intentionally ignored local
 working notes and must not be staged or committed. `coverage.out` and local
